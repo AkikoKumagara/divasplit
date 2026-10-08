@@ -1,0 +1,633 @@
+/*
+ * divasplit - frame pacing / split render plugin for Hatsune Miku: Project DIVA
+ *   X     EU/US 1.00 (PCSB01007 / PCSE00867, module NID 0x0A3FF027)
+ *   f     EU 1.00    (PCSB00419,             module NID 0x544807B3)
+ *   f 2nd EU 1.00    (PCSB00554,             module NID 0xDB737975)
+ *
+ * Every frame the games call RenderStage(stage) in a loop. X and f 2nd have
+ * 8 stages (X: seg0+0x271368, f 2nd: seg0+0x265920, same layout):
+ *   0 viewport / 3D buffer setup + clear     3 3D world (characters, stage)
+ *   1 (empty)                                4 post effects + composite, starts the
+ *   2 extra off-screen pass + draw layer 2     framebuffer scene
+ *   6, 7 (empty)                             5 2D layers (notes, UI) into framebuffer
+ * f has 14 (seg0+0x28C54E): 5 setup, 7 extra pass + layer 1, 8 3D world,
+ * 10 post effects, 11/12 2D layers, the rest empty or flush only.
+ *
+ * The plugin skips the selected 3D stages on some frames, so the last 3D
+ * image is reused while notes and UI still redraw every frame.
+ *
+ * Frame-drop catch-up ("SYNC"): GetDelta() scales the frame step by
+ * target/measured fps when the frame manager's active flag is set. Once per
+ * frame the game copies a "requested" byte into that flag (X: fm+0x2D -> +0x2C,
+ * FM pointer at seg1+0x956C; f 2nd: fm+0xDC -> +0x18, FM at 0x81787B18;
+ * f: fm+0xEC -> +0x18, FM at 0x816E7228).
+ * The game never sets the requested byte; this plugin can.
+ *
+ * Perf readout (updated once per second, ms per frame):
+ *   fps   frames per second (stage 0 to stage 0)
+ *   cpu   time the main thread is busy
+ *   gpu   time blocked in sceGxmBeginScene / EndScene / DisplayQueueAddEntry,
+ *         i.e. waiting for the GPU to catch up
+ *   vs    time in sceDisplayWaitVblankStartMulti: the game waits for vblank
+ *         on the main thread every frame (idle time at a solid 60)
+ *   3d    CPU time of the 3D world stage when it runs (waits excluded)
+ *
+ * Detail readout (X only): the game's own CPU profiler (uint32 microseconds of
+ * the last frame, kept in the frame manager), averaged per second:
+ *   upd   +0x60   whole update (seg0+0x42358)
+ *     a   +0x118  game logic subsystems (seg0+0x42400..0x424C0)
+ *     b   +0x138  seg0+0x2FB282 (conditional)
+ *     c   +0x148  seg0+0x33858E / 0x33851C
+ *   draw  +0x70   whole render function (seg0+0x41CC0, before the swap)
+ *     p   +0x158  render prep (seg0+0x338532 / 0x2FB2AA)
+ *     l   +0x178  layer setup (seg0+0x27468C / 0x274676)
+ *     r   +0x168  render stages loop + scene end
+ *   swap  +0xA0   display swap incl. waiting
+ *
+ * Adaptive vsync ("AVS"): the game waits for the next vblank on its main
+ * thread every frame. A frame that runs even slightly over 16.7 ms then waits
+ * for the vblank after that, so it costs 33 ms (60 -> 30 fps). With AVS on,
+ * the wait is skipped when a vblank already passed since the last frame
+ * started. Every frame still spans at least one vblank (never above 60 fps),
+ * and the flip itself stays on vblank (SetFrameBuf NEXTFRAME), so no tearing.
+ *
+ * AVS only acts on the game's main thread (the one running RenderStage);
+ * other threads that wait for vblank are left alone.
+ *
+ * Hotkeys (hold L + R, then press):
+ *   RIGHT         next preset
+ *   LEFT          toggle AVS (adaptive vsync)
+ *   UP            toggle SYNC (frame-drop catch-up)
+ *   DOWN          toggle recording (+ detail readout on X)
+ *
+ * Settings are remembered per game in ux0:data/divasplit/settings.txt (see
+ * settings.h). The input thread rereads it twice a second, so the Quick Menu
+ * plugin (divasplit_qm.suprx) can change them while the game runs.
+ *
+ * While recording (REC), every 1 s line is appended to
+ * ux0:data/divasplit/log.csv. The render thread only formats the line into a
+ * small ring buffer; the low-priority input thread does the file writes.
+ *
+ * Font: Terminus 8x14 Bold (SIL OFL 1.1), taken from Electry's PSVshell.
+ */
+#include <psp2/kernel/modulemgr.h>
+#include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/clib.h>
+#include <psp2/ctrl.h>
+#include <psp2/display.h>
+#include <psp2/io/fcntl.h>
+#include <psp2/io/stat.h>
+#include <taihen.h>
+#include <stdarg.h>
+
+#include "font_ter_u14b.h"
+#include "settings.h"
+
+#define STAGE_MAX 32
+
+#define NID_LIB_GXM            0xF76B66BD
+#define NID_GXM_BEGIN_SCENE    0x8734FF4E
+#define NID_GXM_END_SCENE      0xFE300E2F
+#define NID_GXM_DQ_ADD_ENTRY   0xEC5C26B5
+#define NID_LIB_DISPLAY_USER   0x4FAACD11
+#define NID_SET_FRAME_BUF      0x7A410B64
+#define NID_LIB_DISPLAY        0x5ED8F994
+#define NID_WAIT_VBLANK_MULTI  0xDD0A13B8
+
+#define FONT_W 8
+#define FONT_H 14
+#define LINE_CHARS 100
+
+#define LOG_DIR   SETTINGS_DIR
+#define LOG_FILE  LOG_DIR "/log.csv"
+#define DIAG_FILE LOG_DIR "/diag.txt"
+#define DIAG_HEARTBEAT_S 180   // heartbeat lines for the first 3 minutes
+#define LOG_SLOTS 8
+#define LOG_LINE  192
+
+typedef struct {
+    uint32_t module_nid;
+    int settings_idx;        // GAME_* in settings.h
+    uint32_t render_stage;   // seg0 offset of RenderStage(stage)
+    uint32_t fm;             // seg1 offset: the frame manager, or a pointer to it
+    int fm_is_ptr;
+    uint32_t fm_sync_req;    // FM byte the game copies into the catch-up flag
+    uint32_t stages;         // seg1 offset: the stage table, or a pointer to it
+    int stages_is_ptr;
+    int has_profiler;        // FM keeps the X profiler slots
+    unsigned char stage_3d, stage_fx, stage_setup;   // stage numbers the presets skip
+    unsigned char prof_flag; // stage table byte: GPU profiler (sceGxmFinish around stages)
+} game_t;
+
+static const game_t GAMES[] = {
+    // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
+    {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C},
+    // f: FM 0x816E7228, stage table 0x818F8B58 (seg1 0x81689000)
+    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18},
+    // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
+    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C},
+};
+#define GAME_COUNT (int)(sizeof(GAMES) / sizeof(GAMES[0]))
+
+enum { PROF_UPD, PROF_A, PROF_B, PROF_C, PROF_DRAW, PROF_P, PROF_L, PROF_R, PROF_SWAP, PROF_COUNT };
+static const unsigned short PROF_OFF[PROF_COUNT] = {0x60, 0x118, 0x138, 0x148, 0x70, 0x158, 0x178, 0x168, 0xA0};
+static const char *const PROF_LABEL[PROF_COUNT] = {
+    " upd ", " (a ", " b ", " c ", ") draw ", " (p ", " l ", " r ", ") swap "};
+
+enum { HOOK_STAGE, HOOK_FB, HOOK_BEGIN, HOOK_END, HOOK_DQ, HOOK_VBLANK, HOOK_COUNT };
+static tai_hook_ref_t g_ref[HOOK_COUNT];
+static SceUID g_hook[HOOK_COUNT] = {-1, -1, -1, -1, -1, -1};
+
+static const game_t *g_game = NULL;
+static uintptr_t g_seg1 = 0;
+
+static SceUID g_thread = -1;
+static volatile int g_run = 1;
+
+static volatile unsigned int g_frame = 0;
+static volatile int g_preset = 0;
+static volatile int g_sync = 0;
+static volatile int g_dirty = 0;   // settings changed: restart the perf window
+static volatile int g_rec = 0;
+static volatile int g_avs = 0;
+static volatile int g_bar = 1;
+static volatile SceUID g_main_thid = -1;   // the thread that runs RenderStage
+static volatile unsigned int g_vb_main = 0, g_vb_other = 0;   // vblank waits per thread kind (diag)
+static settings_t g_settings;              // input thread only
+static unsigned int g_vc_last = 0;     // vblank count when the last frame started
+static unsigned int g_late_total = 0;  // frames whose vblank wait AVS skipped
+
+// log ring: render thread produces at head, input thread writes out at tail
+static char g_log_ring[LOG_SLOTS][LOG_LINE];
+static int g_log_len[LOG_SLOTS];
+static volatile unsigned int g_log_head = 0, g_log_tail = 0;
+static uint64_t g_rec_start = 0;
+static SceUID g_log_fd = -1;
+
+// diagnostics: hooks only set flags, the input thread writes diag.txt
+static volatile int g_cur_stage = -1;
+static volatile int g_seen_stage = 0, g_seen_fb = 0;
+static SceDisplayFrameBuf g_fb_info;
+static uint64_t g_start_time = 0;
+static int g_diag_started = 0;
+
+// diag.txt only covers the current game session: the first line truncates it
+static void diag(const char *fmt, ...) {
+    char buf[192];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = sceClibVsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return;
+    if (n > (int)sizeof(buf) - 2)
+        n = sizeof(buf) - 2;
+    buf[n++] = '\n';
+    sceIoMkdir(LOG_DIR, 0777);
+    SceUID fd = sceIoOpen(DIAG_FILE, SCE_O_WRONLY | SCE_O_CREAT |
+            (g_diag_started ? SCE_O_APPEND : SCE_O_TRUNC), 0666);
+    g_diag_started = 1;
+    if (fd >= 0) {
+        sceIoWrite(fd, buf, n);
+        sceIoClose(fd);
+    }
+}
+
+// perf counters, touched from the game's main thread only
+static uint64_t g_gpu_total;      // us spent in the hooked gxm calls, ever
+static uint64_t g_vs_total;       // us spent waiting for vblank, ever
+static uint64_t g_last_frame;     // time of the last stage 0
+static uint64_t g_win_start, g_win_gpu_start, g_win_vs_start;
+static unsigned int g_win_late_start;
+static uint64_t g_win_3d;
+static unsigned int g_win_frames, g_win_3d_n;
+static uint32_t g_win_prof[PROF_COUNT];
+
+typedef struct {
+    int valid;
+    int fps10, cpu10, gpu10, vs10, s3d10;  // tenths
+    int late;                              // AVS-skipped waits in the last second
+    int prof10[PROF_COUNT];
+} perf_t;
+static volatile perf_t g_perf;
+
+// status line, double buffered: the display thread draws g_text[g_text_idx]
+static char g_text[2][LINE_CHARS + 1];
+static int g_text_len[2];
+static volatile int g_text_idx = 0;
+
+static volatile uint8_t *seg1_object(uint32_t off, int is_ptr) {
+    if (!g_seg1)
+        return NULL;
+    if (is_ptr)
+        return *(volatile uint8_t **)(g_seg1 + off);
+    return (volatile uint8_t *)(g_seg1 + off);
+}
+
+static volatile uint8_t *fm_base(void) {
+    return seg1_object(g_game->fm, g_game->fm_is_ptr);
+}
+
+#define MS(v) (v) / 10, (v) % 10
+
+static const char *game_tag(void) {
+    return SETTINGS_GAME_TAG[g_game->settings_idx];
+}
+
+static unsigned int preset_mask(const preset_t *p) {
+    return (p->skip_3d ? 1u << g_game->stage_3d : 0)
+         | (p->skip_fx ? 1u << g_game->stage_fx : 0)
+         | (p->skip_setup ? 1u << g_game->stage_setup : 0);
+}
+
+static void update_text(void) {
+    int i = g_text_idx ^ 1;
+    char *t = g_text[i];
+    const int size = sizeof(g_text[i]);
+    const char *prof = "";
+    volatile uint8_t *stages = seg1_object(g_game->stages, g_game->stages_is_ptr);
+    if (stages && stages[g_game->prof_flag])
+        prof = " PROF";
+    int n;
+    if (!g_perf.valid) {
+        n = sceClibSnprintf(t, size, "%sSPLIT %s  SYNC %s  AVS %s", g_rec ? "REC " : "",
+                PRESETS[g_preset].name, g_sync ? "ON" : "OFF", g_avs ? "ON" : "OFF");
+    } else if (g_rec && g_game->has_profiler) {
+        // gpu is left out (swap covers it) and l is always 0.0: both still go to the log
+        n = sceClibSnprintf(t, size, "REC %s%s%s %2dfps vs %d.%d",
+                PRESETS[g_preset].name, g_sync ? " SYNC" : "", g_avs ? " AVS" : "",
+                (g_perf.fps10 + 5) / 10, MS(g_perf.vs10));
+        for (int k = 0; k < PROF_COUNT && n < LINE_CHARS; k++)
+            if (k != PROF_L)
+                n += sceClibSnprintf(t + n, size - n, "%s%d.%d", PROF_LABEL[k], MS(g_perf.prof10[k]));
+    } else {
+        n = sceClibSnprintf(t, size,
+                "%sSPLIT %s  SYNC %s  AVS %s  %2dfps cpu %d.%d gpu %d.%d vs %d.%d 3d %d.%d%s",
+                g_rec ? "REC " : "", PRESETS[g_preset].name, g_sync ? "ON" : "OFF",
+                g_avs ? "ON" : "OFF",
+                (g_perf.fps10 + 5) / 10, MS(g_perf.cpu10), MS(g_perf.gpu10),
+                MS(g_perf.vs10), MS(g_perf.s3d10), prof);
+    }
+    g_text_len[i] = n > LINE_CHARS ? LINE_CHARS : n;
+    g_text_idx = i;
+}
+
+static void log_line(uint64_t now) {
+    unsigned int head = g_log_head;
+    if (head - g_log_tail >= LOG_SLOTS)
+        return;   // writer is behind: drop this second
+    if (g_rec_start == 0)
+        g_rec_start = now;
+    unsigned int t10 = (unsigned int)((now - g_rec_start) / 100000);
+    char *line = g_log_ring[head % LOG_SLOTS];
+    int n = sceClibSnprintf(line, LOG_LINE, "%u.%u,%s,%s,%d,%d,%d,%d.%d,%d.%d,%d.%d,%d.%d,%d.%d",
+            t10 / 10, t10 % 10, game_tag(), PRESETS[g_preset].name, g_sync, g_avs, g_perf.late,
+            MS(g_perf.fps10), MS(g_perf.cpu10), MS(g_perf.gpu10), MS(g_perf.vs10), MS(g_perf.s3d10));
+    for (int k = 0; k < PROF_COUNT && n < LOG_LINE - 16; k++)
+        n += sceClibSnprintf(line + n, LOG_LINE - n, ",%d.%d", MS(g_perf.prof10[k]));
+    line[n++] = '\n';
+    g_log_len[head % LOG_SLOTS] = n;
+    __sync_synchronize();
+    g_log_head = head + 1;
+}
+
+static void log_flush(void) {
+    if (g_rec && g_log_fd < 0) {
+        sceIoMkdir(LOG_DIR, 0777);
+        g_log_fd = sceIoOpen(LOG_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0666);
+        if (g_log_fd >= 0) {
+            static const char hdr[] = "# divasplit 1.7 recording\n"
+                "t,game,preset,sync,avs,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap\n";
+            sceIoWrite(g_log_fd, hdr, sizeof(hdr) - 1);
+        }
+    }
+    while (g_log_tail != g_log_head) {
+        __sync_synchronize();
+        unsigned int i = g_log_tail % LOG_SLOTS;
+        if (g_log_fd >= 0)
+            sceIoWrite(g_log_fd, g_log_ring[i], g_log_len[i]);
+        g_log_tail++;
+    }
+    if (!g_rec && g_log_fd >= 0) {
+        sceIoClose(g_log_fd);
+        g_log_fd = -1;
+    }
+}
+
+static void window_reset(uint64_t now) {
+    g_win_start = now;
+    g_win_gpu_start = g_gpu_total;
+    g_win_vs_start = g_vs_total;
+    g_win_late_start = g_late_total;
+    g_win_frames = g_win_3d_n = 0;
+    g_win_3d = 0;
+    sceClibMemset(g_win_prof, 0, sizeof(g_win_prof));
+}
+
+static void frame_boundary(uint64_t now) {
+    g_frame++;
+    volatile uint8_t *fm = fm_base();
+    // the game copies this byte into the active catch-up flag every frame
+    if (fm)
+        fm[g_game->fm_sync_req] = g_sync ? 1 : 0;
+
+    if (g_last_frame) {
+        g_win_frames++;
+        // the profiler slots hold the last frame's times
+        if (fm && g_game->has_profiler) {
+            for (int k = 0; k < PROF_COUNT; k++) {
+                uint32_t us = *(const volatile uint32_t *)(fm + PROF_OFF[k]);
+                g_win_prof[k] += us < 100000 ? us : 100000;
+            }
+        }
+    }
+    g_last_frame = now;
+
+    int dirty = g_dirty;
+    if (dirty) {
+        g_dirty = 0;
+        g_perf.valid = 0;   // old numbers belong to the old setting
+        update_text();
+    }
+    uint64_t span = now - g_win_start;
+    if (dirty || g_win_start == 0 || span > 5000000) {   // new setting, first frame or long stall
+        window_reset(now);
+        return;
+    }
+    if (span < 1000000 || g_win_frames == 0)
+        return;
+
+    unsigned int frame_us = (unsigned int)(span / g_win_frames);
+    unsigned int gpu_us = (unsigned int)((g_gpu_total - g_win_gpu_start) / g_win_frames);
+    unsigned int vs_us = (unsigned int)((g_vs_total - g_win_vs_start) / g_win_frames);
+    unsigned int idle_us = gpu_us + vs_us;
+    g_perf.fps10 = (int)((uint64_t)g_win_frames * 10000000ull / span);
+    g_perf.gpu10 = (int)(gpu_us / 100);
+    g_perf.vs10 = (int)(vs_us / 100);
+    g_perf.cpu10 = (int)((frame_us > idle_us ? frame_us - idle_us : 0) / 100);
+    g_perf.s3d10 = g_win_3d_n ? (int)(g_win_3d / g_win_3d_n / 100) : 0;
+    g_perf.late = (int)(g_late_total - g_win_late_start);
+    for (int k = 0; k < PROF_COUNT; k++)
+        g_perf.prof10[k] = (int)(g_win_prof[k] / g_win_frames / 100);
+    g_perf.valid = 1;
+    update_text();
+    if (g_rec)
+        log_line(now);
+    else
+        g_rec_start = 0;
+
+    window_reset(now);
+}
+
+static int render_stage_hook(int stage) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    g_seen_stage = 1;
+    if (stage == 0) {
+        g_main_thid = sceKernelGetThreadId();
+        frame_boundary(t0);
+    }
+
+    const preset_t *p = &PRESETS[g_preset];
+    if (stage >= 0 && stage < STAGE_MAX && (preset_mask(p) & (1u << stage))
+            && (p->period == 0 || (g_frame % p->period) != 0))
+        return 0;
+
+    uint64_t w0 = g_gpu_total;
+    g_cur_stage = stage;
+    int ret = TAI_CONTINUE(int, g_ref[HOOK_STAGE], stage);
+    g_cur_stage = -1;
+    if (stage == g_game->stage_3d) {
+        uint64_t busy = sceKernelGetProcessTimeWide() - t0 - (g_gpu_total - w0);
+        g_win_3d += busy;
+        g_win_3d_n++;
+    }
+    return ret;
+}
+
+static int begin_scene_hook(void *ctx, unsigned int flags, const void *rt, const void *region,
+        void *vsync, void *fsync, const void *color, const void *depth) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    int ret = TAI_CONTINUE(int, g_ref[HOOK_BEGIN], ctx, flags, rt, region, vsync, fsync, color, depth);
+    g_gpu_total += sceKernelGetProcessTimeWide() - t0;
+    return ret;
+}
+
+static int end_scene_hook(void *ctx, const void *vnotif, const void *fnotif) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    int ret = TAI_CONTINUE(int, g_ref[HOOK_END], ctx, vnotif, fnotif);
+    g_gpu_total += sceKernelGetProcessTimeWide() - t0;
+    return ret;
+}
+
+static int dq_add_entry_hook(void *old_buf, void *new_buf, const void *data) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    int ret = TAI_CONTINUE(int, g_ref[HOOK_DQ], old_buf, new_buf, data);
+    g_gpu_total += sceKernelGetProcessTimeWide() - t0;
+    return ret;
+}
+
+static int wait_vblank_multi_hook(unsigned int vcount) {
+    if (sceKernelGetThreadId() != g_main_thid) {   // e.g. f's loading loop waits 2 vblanks
+        g_vb_other++;
+        return TAI_CONTINUE(int, g_ref[HOOK_VBLANK], vcount);
+    }
+    g_vb_main++;
+    if (g_avs && g_vc_last && vcount > 0) {
+        unsigned int vc = (unsigned int)sceDisplayGetVcount();
+        if (vc - g_vc_last >= vcount) {   // the vblank we would wait for already passed: late
+            g_vc_last = vc;
+            g_late_total++;
+            return 0;
+        }
+    }
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    int ret = TAI_CONTINUE(int, g_ref[HOOK_VBLANK], vcount);
+    g_vs_total += sceKernelGetProcessTimeWide() - t0;
+    g_vc_last = (unsigned int)sceDisplayGetVcount();
+    return ret;
+}
+
+static void draw_text(const SceDisplayFrameBuf *fb) {
+    int idx = g_text_idx;
+    int len = g_text_len[idx];
+    const char *text = g_text[idx];
+    if (len <= 0 || fb->pixelformat != SCE_DISPLAY_PIXELFORMAT_A8B8G8R8)
+        return;
+    if ((int)fb->width < len * FONT_W + 8 || (int)fb->height < FONT_H + 8)
+        return;
+    uint32_t *base = (uint32_t *)fb->base;
+    int y0 = fb->height - FONT_H - 4;
+    for (int y = 0; y < FONT_H; y++) {
+        uint32_t *row = base + (y0 + y) * fb->pitch + 4;
+        for (int c = 0; c < len; c++) {
+            unsigned char bits = FONT_TER_U14B[(unsigned char)text[c] * FONT_H + y];
+            for (int x = 0; x < FONT_W; x++)
+                row[c * FONT_W + x] = ((bits >> (7 - x)) & 1) ? 0xFF00FFFF : 0xFF000000;
+        }
+    }
+}
+
+static int set_frame_buf_hook(const SceDisplayFrameBuf *pParam, SceDisplaySetBufSync sync) {
+    if (!g_seen_fb && pParam) {
+        g_fb_info = *pParam;
+        g_seen_fb = 1;
+    }
+    if (g_bar && pParam && pParam->base)
+        draw_text(pParam);
+    return TAI_CONTINUE(int, g_ref[HOOK_FB], pParam, sync);
+}
+
+static void settings_current(game_settings_t *gs) {
+    gs->preset = g_preset;
+    gs->sync = g_sync;
+    gs->avs = g_avs;
+    gs->bar = g_bar;
+    gs->rec = g_rec;
+}
+
+static void settings_apply(const game_settings_t *gs) {
+    g_preset = gs->preset;
+    g_sync = gs->sync;
+    g_avs = gs->avs;
+    g_bar = gs->bar;
+    g_rec = gs->rec;
+    g_dirty = 1;   // the render thread redraws the status line
+}
+
+// write our current values, keep the other games' lines
+static void settings_store(void) {
+    settings_load(&g_settings);
+    settings_current(&g_settings.game[g_game->settings_idx]);
+    g_settings.active = g_game->settings_idx;
+    settings_save(&g_settings);
+}
+
+// pick up changes made by the Quick Menu plugin
+static void settings_poll(void) {
+    game_settings_t cur;
+    settings_load(&g_settings);
+    settings_current(&cur);
+    if (!game_settings_equal(&g_settings.game[g_game->settings_idx], &cur))
+        settings_apply(&g_settings.game[g_game->settings_idx]);
+}
+
+static int input_thread(SceSize args, void *argp) {
+    unsigned int prev = 0;
+    int logged_stage = 0, logged_fb = 0;
+    unsigned int next_beat = 5;
+    unsigned int tick = 0;
+    while (g_run) {
+        unsigned int secs = (unsigned int)((sceKernelGetProcessTimeWide() - g_start_time) / 1000000);
+        if (g_seen_stage && !logged_stage) {
+            logged_stage = 1;
+            diag("%us first RenderStage call", secs);
+        }
+        if (g_seen_fb && !logged_fb) {
+            logged_fb = 1;
+            diag("%us first SetFrameBuf %ux%u pitch %u fmt %08X base %p", secs,
+                    g_fb_info.width, g_fb_info.height, g_fb_info.pitch,
+                    (unsigned)g_fb_info.pixelformat, g_fb_info.base);
+        }
+        if (secs >= next_beat && next_beat <= DIAG_HEARTBEAT_S) {
+            next_beat += 5;
+            diag("%us frames %u in-stage %d fps %d vblank waits main %u other %u", secs, g_frame,
+                    g_cur_stage, g_perf.valid ? (g_perf.fps10 + 5) / 10 : -1, g_vb_main, g_vb_other);
+        }
+
+        SceCtrlData pad;
+        sceClibMemset(&pad, 0, sizeof(pad));
+        sceCtrlPeekBufferPositive(0, &pad, 1);
+        unsigned int pressed = pad.buttons & ~prev;
+        prev = pad.buttons;
+
+        if ((pad.buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER)) == (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER)) {
+            int changed = 0;
+            if (pressed & SCE_CTRL_RIGHT) {
+                g_preset = (g_preset + 1) % PRESET_COUNT;
+                changed = 1;
+            }
+            if (pressed & SCE_CTRL_UP) {
+                g_sync = !g_sync;
+                changed = 1;
+            }
+            if (pressed & SCE_CTRL_LEFT) {
+                g_avs = !g_avs;
+                changed = 1;
+            }
+            if (pressed & SCE_CTRL_DOWN) {
+                g_rec = !g_rec;
+                changed = 1;
+            }
+            if (changed) {
+                g_dirty = 1;   // the render thread redraws the status line
+                settings_store();
+            }
+        } else if (++tick % 10 == 0) {   // every 0.5 s
+            settings_poll();
+        }
+        log_flush();
+        sceKernelDelayThread(50 * 1000);
+    }
+    return 0;
+}
+
+void _start() __attribute__ ((weak, alias("module_start")));
+int module_start(SceSize argc, const void *args) {
+    tai_module_info_t info;
+    info.size = sizeof(info);
+    g_start_time = sceKernelGetProcessTimeWide();
+    if (taiGetModuleInfo(TAI_MAIN_MODULE, &info) < 0) {
+        diag("== divasplit 1.7: taiGetModuleInfo failed");
+        return SCE_KERNEL_START_SUCCESS;
+    }
+    for (int i = 0; i < GAME_COUNT; i++)
+        if (GAMES[i].module_nid == info.module_nid)
+            g_game = &GAMES[i];
+    if (!g_game)
+        return SCE_KERNEL_START_SUCCESS;   // not a build we know: do nothing
+    diag("== divasplit 1.7: %s nid %08X -> %s", info.name, (unsigned)info.module_nid, game_tag());
+
+    // remembered settings; recording never carries over to a new session
+    settings_load(&g_settings);
+    g_settings.game[g_game->settings_idx].rec = 0;
+    settings_apply(&g_settings.game[g_game->settings_idx]);
+    g_settings.active = g_game->settings_idx;
+    settings_save(&g_settings);
+
+    SceKernelModuleInfo minfo;
+    sceClibMemset(&minfo, 0, sizeof(minfo));
+    minfo.size = sizeof(minfo);
+    if (sceKernelGetModuleInfo(info.modid, &minfo) >= 0)
+        g_seg1 = (uintptr_t)minfo.segments[1].vaddr;
+
+    g_hook[HOOK_STAGE] = taiHookFunctionOffset(&g_ref[HOOK_STAGE], info.modid, 0, g_game->render_stage, 1, render_stage_hook);
+    g_hook[HOOK_FB] = taiHookFunctionImport(&g_ref[HOOK_FB], TAI_MAIN_MODULE, NID_LIB_DISPLAY_USER, NID_SET_FRAME_BUF, set_frame_buf_hook);
+    g_hook[HOOK_BEGIN] = taiHookFunctionImport(&g_ref[HOOK_BEGIN], TAI_MAIN_MODULE, NID_LIB_GXM, NID_GXM_BEGIN_SCENE, begin_scene_hook);
+    g_hook[HOOK_END] = taiHookFunctionImport(&g_ref[HOOK_END], TAI_MAIN_MODULE, NID_LIB_GXM, NID_GXM_END_SCENE, end_scene_hook);
+    g_hook[HOOK_DQ] = taiHookFunctionImport(&g_ref[HOOK_DQ], TAI_MAIN_MODULE, NID_LIB_GXM, NID_GXM_DQ_ADD_ENTRY, dq_add_entry_hook);
+    g_hook[HOOK_VBLANK] = taiHookFunctionImport(&g_ref[HOOK_VBLANK], TAI_MAIN_MODULE, NID_LIB_DISPLAY, NID_WAIT_VBLANK_MULTI, wait_vblank_multi_hook);
+    diag("seg1 %08X hooks stage %08X fb %08X begin %08X end %08X dq %08X vblank %08X",
+            (unsigned)g_seg1, g_hook[HOOK_STAGE], g_hook[HOOK_FB], g_hook[HOOK_BEGIN],
+            g_hook[HOOK_END], g_hook[HOOK_DQ], g_hook[HOOK_VBLANK]);
+
+    update_text();
+    g_thread = sceKernelCreateThread("divasplit_input", input_thread, 0x10000100, 0x4000, 0, 0, NULL);
+    if (g_thread >= 0)
+        sceKernelStartThread(g_thread, 0, NULL);
+    return SCE_KERNEL_START_SUCCESS;
+}
+
+int module_stop(SceSize argc, const void *args) {
+    if (g_thread >= 0) {
+        g_run = 0;
+        sceKernelWaitThreadEnd(g_thread, NULL, NULL);
+        sceKernelDeleteThread(g_thread);
+    }
+    if (g_log_fd >= 0)
+        sceIoClose(g_log_fd);
+    for (int i = 0; i < HOOK_COUNT; i++)
+        if (g_hook[i] >= 0)
+            taiHookRelease(g_hook[i], g_ref[i]);
+    return SCE_KERNEL_STOP_SUCCESS;
+}
