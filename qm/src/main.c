@@ -7,8 +7,15 @@
  * the change up within half a second. The settings shown are the ones of the
  * DIVA game that started last.
  *
- * Install: QuickMenuReborn under *main, then this file into
- * ux0:QuickMenuReborn/ (or ur0:QuickMenuReborn/).
+ * Install: QuickMenuReborn under *main, qmr_plugin.rco in ur0:QuickMenuReborn/
+ * (QuickMenuReborn 2.5 always loads it from ur0:), this file in
+ * ux0:QuickMenuReborn/ (or ur0:QuickMenuReborn/ if there is no ux0 one).
+ *
+ * QuickMenuReborn creates the widgets one by one when the menu opens and only
+ * then calls each one's OnLoad. Setting a label on a widget that isn't created
+ * yet dereferences a NULL widget and takes SceShell down, so every OnLoad here
+ * only touches its own widget; checkbox states go through QuickMenuReborn's
+ * saved state, which DefaultCheckBoxRecall applies when the box is created.
  */
 #include <psp2/kernel/modulemgr.h>
 #include <psp2/kernel/clib.h>
@@ -19,7 +26,6 @@
 #define ID(x) "divasplit_qm_" x
 
 #define SEPARATOR_ID ID("sep")
-#define LOADER_ID    ID("loader")
 #define TITLE_ID     ID("title")
 #define PRESET_ID    ID("preset")
 
@@ -45,16 +51,17 @@ static int current_game(const settings_t *s) {
     return s->active >= 0 ? s->active : GAME_X;
 }
 
+static int g_menu_preset = 0;   // preset of the shown game, read when the title loads
+
 static void set_preset_label(int preset) {
     char label[64];
     sceClibSnprintf(label, sizeof(label), "3D preset: %s", PRESETS[preset].name);
     QuickMenuRebornSetWidgetLabel(PRESET_ID, label);
 }
 
-// The loader is registered first, so QuickMenuReborn creates it (and calls
-// this) before the other widgets: labels and saved checkbox states set here
-// are what those widgets get created with.
-ONLOAD_HANDLER(on_loader_load) {
+// The title is created before the rows and the preset button, so the saved
+// checkbox states written here are what the boxes get created with.
+ONLOAD_HANDLER(on_title_load) {
     settings_t s;
     settings_load(&s);
     int g = current_game(&s);
@@ -62,9 +69,13 @@ ONLOAD_HANDLER(on_loader_load) {
     char title[96];
     sceClibSnprintf(title, sizeof(title), "divasplit - %s", SETTINGS_GAME_NAME[g]);
     QuickMenuRebornSetWidgetLabel(TITLE_ID, title);
-    set_preset_label(s.game[g].preset);
     for (int row = 0; row < ROW_COUNT; row++)
         QuickMenuRebornSaveCheckBoxState(ROW_BOX[row], *row_field(&s.game[g], row) ? 1 : 0);
+    g_menu_preset = s.game[g].preset;
+}
+
+ONLOAD_HANDLER(on_preset_load) {
+    set_preset_label(g_menu_preset);
 }
 
 BUTTON_HANDLER(on_checkbox) {
@@ -89,15 +100,11 @@ void _start() __attribute__ ((weak, alias("module_start")));
 int module_start(SceSize argc, const void *args) {
     QuickMenuRebornSeparator(SEPARATOR_ID, SCE_SEPARATOR_HEIGHT);
 
-    QuickMenuRebornRegisterWidget(LOADER_ID, NULL, plane);
-    QuickMenuRebornSetWidgetSize(LOADER_ID, SCE_PLANE_WIDTH, 1, 0, 0);
-    QuickMenuRebornSetWidgetColor(LOADER_ID, 1, 1, 1, 0);
-    QuickMenuRebornAssignOnLoadHandler(on_loader_load, LOADER_ID);
-
     QuickMenuRebornRegisterWidget(TITLE_ID, NULL, text);
     QuickMenuRebornSetWidgetSize(TITLE_ID, SCE_PLANE_WIDTH, 50, 0, 0);
     QuickMenuRebornSetWidgetColor(TITLE_ID, 1, 1, 1, 1);
     QuickMenuRebornSetWidgetLabel(TITLE_ID, "divasplit");
+    QuickMenuRebornAssignOnLoadHandler(on_title_load, TITLE_ID);
 
     for (int row = 0; row < ROW_COUNT; row++) {
         QuickMenuRebornRegisterWidget(ROW_PLANE[row], NULL, plane);
@@ -122,7 +129,8 @@ int module_start(SceSize argc, const void *args) {
     QuickMenuRebornSetWidgetSize(PRESET_ID, 400, 70, 0, 0);
     QuickMenuRebornSetWidgetColor(PRESET_ID, 1, 1, 1, 1);
     QuickMenuRebornRegisterEventHanlder(PRESET_ID, QMR_BUTTON_RELEASE_ID, on_preset, NULL);
-    set_preset_label(0);
+    QuickMenuRebornAssignOnLoadHandler(on_preset_load, PRESET_ID);
+    set_preset_label(0);   // menu not shown yet: only stores the label
 
     return SCE_KERNEL_START_SUCCESS;
 }
@@ -135,7 +143,6 @@ int module_stop(SceSize argc, const void *args) {
         QuickMenuRebornUnregisterWidget(ROW_PLANE[row]);
     }
     QuickMenuRebornUnregisterWidget(TITLE_ID);
-    QuickMenuRebornUnregisterWidget(LOADER_ID);
     QuickMenuRebornRemoveSeparator(SEPARATOR_ID);
     return SCE_KERNEL_STOP_SUCCESS;
 }

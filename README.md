@@ -41,8 +41,8 @@ You need taiHEN (HENkaku / Ensō) and VitaShell.
 This needs [QuickMenuReborn](https://github.com/Ibrahim778/QuickMenuReborn/releases) v2.5.
 
 1. Copy `QuickMenuReborn.suprx` to `ur0:tai/` and add it under `*main` in `config.txt`.
-2. Create a folder `ux0:QuickMenuReborn/` (or `ur0:QuickMenuReborn/` if you use SD2Vita).
-3. Copy `qmr_plugin.rco` (from the QuickMenuReborn release) and `divasplit_qm.suprx` into that folder.
+2. Copy `qmr_plugin.rco` (from the QuickMenuReborn release) to **`ur0:QuickMenuReborn/`**. Version 2.5 always loads it from `ur0:`, even if you keep its plugins on `ux0:`.
+3. Copy `divasplit_qm.suprx` to `ux0:QuickMenuReborn/` (or `ur0:QuickMenuReborn/` if there is no `ux0:` folder).
 4. Reboot.
 
 Holding PS shows a *divasplit* section with these toggles:
