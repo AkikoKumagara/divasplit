@@ -6,15 +6,16 @@
  * (kernel side): the sampling profiler's start arguments and file format.
  *
  * ux0:data/divasplit/prof.bin = prof_header_t, then prof_sample_t records:
- * one per sampled thread at each pause, same t_us.
+ * at each pause, one per sampled thread that is running, or that waits
+ * somewhere else than at its last record (a waiting thread is written once).
  */
 
 #include <stdint.h>
 
 #define PROF_MAGIC        0x46525044   // "DPRF"
-#define PROF_VERSION      4
+#define PROF_VERSION      5
 #define PROF_STACK_WORDS  24
-#define PROF_MAX_THREADS  8
+#define PROF_MAX_THREADS  32
 #define PROF_NAME_LEN     32
 #define PROF_FILE         "ux0:data/divasplit/prof.bin"
 #define PROF_STATS_FILE   "ux0:data/divasplit/prof.txt"
@@ -36,8 +37,10 @@ typedef struct {
     uint32_t magic, version, header_size, sample_size;
     uint32_t rate_hz, module_nid, text_base, text_size;
     uint32_t stack_words, nthreads;
-    uint32_t reserved[6];
+    uint32_t start_lo, start_hi;   // system time of t_us 0 (sceKernelGetSystemTimeWide)
+    uint32_t reserved[4];
     char names[PROF_MAX_THREADS][PROF_NAME_LEN];   // sampled threads, [0] = main
+    int32_t thids[PROF_MAX_THREADS];               // their user ids (as in trace.bin)
 } prof_header_t;
 
 #define PROF_F_USER     1   // the main thread was in user mode

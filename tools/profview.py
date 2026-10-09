@@ -118,7 +118,9 @@ class Code:
 
 def load(path):
     """Header dict and samples as (t, frame, stage, flags, nstack, pc, lr, sp, cpsr,
-    kpc, kcpsr, cost, stack, thread)."""
+    kpc, kcpsr, cost, stack, thread, weight). From version 5 on, a waiting thread
+    is only written when its state changes; weight is the number of sample
+    periods a record stands for (1 for older files and running threads)."""
     data = open(path, 'rb').read()
     h = HEADER.unpack_from(data, 0)
     magic, version, header_size, sample_size, rate, nid, text_base, text_size, stack_words = h[:9]
@@ -137,7 +139,19 @@ def load(path):
         else:
             s, thread = SAMPLE_HEAD_V1.unpack_from(data, off), 0
         st = stack.unpack_from(data, off + SAMPLE_HEAD_V1.size)
-        samples.append(s + (st[:s[4]], thread))
+        samples.append(s + (st[:s[4]], thread, 1))
+    if version >= 5 and samples:
+        # pause period: the most common gap between pauses
+        ts = sorted({x[0] for x in samples})
+        gaps = sorted(b - a for a, b in zip(ts, ts[1:]) if b > a)
+        period = gaps[len(gaps) // 4] if gaps else 2000
+        last = {}
+        for i, x in enumerate(samples):
+            prev = last.get(x[13])
+            if prev is not None and not samples[prev][3] & 1:
+                w = max(1, round((x[0] - samples[prev][0]) / period))
+                samples[prev] = samples[prev][:14] + (w,)
+            last[x[13]] = i
     return dict(rate=rate, nid=nid, text_base=text_base, text_size=text_size, threads=names), samples
 
 
@@ -163,7 +177,8 @@ def main():
         print(f'warning: recording is from module NID 0x{hdr["nid"]:08X}, the ELF is 0x{code.elf.module_nid:08X}')
     base, size = hdr['text_base'], hdr['text_size']
     # real time between samples: the pauses themselves stretch the nominal period
-    period_ms = (samples[-1][0] - samples[0][0]) / 1000.0 / max(1, len(samples) - 1)
+    pauses_t = sorted({x[0] for x in all_samples})
+    period_ms = (pauses_t[-1] - pauses_t[0]) / 1000.0 / max(1, len(pauses_t) - 1)
 
     # frame lengths from the first sample of each frame
     first_t = {}
@@ -178,7 +193,7 @@ def main():
     light = {f for f, ms in frame_ms.items() if ms <= args.heavy_ms}
 
     def where(s):
-        t, frame, stage, flags, n, pc, lr, sp, cpsr, kpc, kcpsr, cost, stack, _ = s
+        t, frame, stage, flags, n, pc, lr, sp, cpsr, kpc, kcpsr, cost, stack, _, _ = s
         if not flags & F_REGS:
             return '[no registers]', [], 'wait'
         rets = []
@@ -222,8 +237,9 @@ def main():
         if args.stage is not None and stage != args.stage:
             continue
         self_f, rets, kind = where(s)
+        w = s[14]
         if kind == 'lib' and rets:
-            lib_callers[rets[0]] += 1
+            lib_callers[rets[0]] += w
         # inclusive = CPU time only; waits have their own table
         incl = set(rets) if kind != 'wait' else set()
         if not isinstance(self_f, str):
@@ -231,11 +247,11 @@ def main():
         for g, fs in groups.items():
             if fs is not None and frame not in fs:
                 continue
-            self_c[g][self_f] += 1
-            stage_c[g][stage] += 1
-            kind_c[g][(stage, kind)] += 1
+            self_c[g][self_f] += w
+            stage_c[g][stage] += w
+            kind_c[g][(stage, kind)] += w
             for f in incl:
-                incl_c[g][f] += 1
+                incl_c[g][f] += w
 
     def ms(g, n):
         return n * period_ms / nframes[g] if nframes[g] else 0.0
@@ -246,8 +262,8 @@ def main():
         print('sampled threads, ms per frame (cpu = running in the game or a library, kernel = waiting or in a system call):')
         for i, n in enumerate(names):
             ts = [x for x in all_samples if x[13] == i and x[1] in frame_ms]
-            cpu = sum(1 for x in ts if x[3] & F_USER) * period_ms / len(frame_ms)
-            ker = sum(1 for x in ts if not x[3] & F_USER) * period_ms / len(frame_ms)
+            cpu = sum(x[14] for x in ts if x[3] & F_USER) * period_ms / len(frame_ms)
+            ker = sum(x[14] for x in ts if not x[3] & F_USER) * period_ms / len(frame_ms)
             print(f'  {i} {n:34s} cpu {cpu:5.2f}  kernel {ker:5.2f}')
         print(f'reporting on thread {thread} ({names[thread]})\n')
     print(f'{len(samples)} samples, one per {period_ms:.2f} ms (nominal {hdr["rate"]} Hz), {total} in complete frames'

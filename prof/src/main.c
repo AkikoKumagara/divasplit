@@ -60,6 +60,10 @@ static unsigned int g_suspend_fail, g_regs_fail, g_scan_fail, g_user, g_cost_max
 static uint64_t g_cost_total;
 static prof_sample_t g_first[4];
 static unsigned int g_pauses;
+// last written state of each thread: a waiting thread is written once
+static uint32_t g_last_pc[PROF_MAX_THREADS], g_last_lr[PROF_MAX_THREADS];
+static uint8_t g_last_flags[PROF_MAX_THREADS];
+static prof_args_t g_new_args;
 
 static void write_stats(uint64_t duration_us) {
     char buf[1024];
@@ -88,13 +92,14 @@ static int in_text(uint32_t addr) {
     return addr - g_args.text_base < g_args.text_size;
 }
 
-// while the game is paused: registers and return addresses on the stack
-static void take(prof_sample_t *s, SceUID thread, uint32_t stack_top) {
+// while the game is paused: registers and return addresses on the stack.
+// Returns 1 when the sample is worth writing.
+static int take(prof_sample_t *s, int t, SceUID thread, uint32_t stack_top) {
     SceThreadCpuRegisters regs;
     memset(&regs, 0, sizeof(regs));
     if (ksceKernelGetThreadCpuRegisters(thread, &regs) < 0) {
         g_regs_fail++;
-        return;
+        return 0;
     }
     // set 0 is the current context. Inside a system call it is the kernel's and
     // set 1 holds the user mode registers saved on entry.
@@ -107,7 +112,7 @@ static void take(prof_sample_t *s, SceUID thread, uint32_t stack_top) {
         s->kpc = cur->pc;
         s->kcpsr = cur->cpsr;
         if ((saved->cpsr & 0x1F) != 0x10)
-            return;
+            return 0;
         u = saved;
         s->flags |= PROF_F_SYSCALL;
     }
@@ -116,27 +121,37 @@ static void take(prof_sample_t *s, SceUID thread, uint32_t stack_top) {
     s->sp = u->sp;
     s->cpsr = u->cpsr;
 
+    // still waiting where it was: nothing new
+    int user = s->flags & PROF_F_USER;
+    if (!user && g_last_flags[t] == s->flags && g_last_pc[t] == s->pc && g_last_lr[t] == s->lr)
+        return 0;
+    g_last_flags[t] = s->flags;
+    g_last_pc[t] = s->pc;
+    g_last_lr[t] = s->lr;
+
     // Thumb return addresses (bit 0 set) into the eboot; profview checks
     // that each one follows a call instruction
     uint32_t sp = u->sp;
     if (sp < 0x80000000 || sp >= 0xE0000000)
-        return;
-    // never read past the end of the stack: a failed copy is slow
-    int len = SCAN_BYTES;
+        return 1;
+    // never read past the end of the stack: a failed copy is slow. A wait
+    // only needs the caller of the system call.
+    int len = user ? SCAN_BYTES : SCAN_BYTES / 4;
     if (stack_top) {
         if (sp >= stack_top)
-            return;
+            return 1;
         if (stack_top - sp < (uint32_t)len)
             len = (int)(stack_top - sp) & ~3;
     }
     if (len < 4 || ksceKernelCopyFromUserProc(g_pid, g_scan, (const void *)sp, len) < 0) {
         g_scan_fail++;
-        return;
+        return 1;
     }
     s->flags |= PROF_F_STACK;
     for (int i = 0; i < len / 4 && s->nstack < PROF_STACK_WORDS; i++)
         if ((g_scan[i] & 1) && in_text(g_scan[i] - 1))
             s->stack[s->nstack++] = g_scan[i];
+    return 1;
 }
 
 static int sampler(SceSize argc, void *argp) {
@@ -144,9 +159,9 @@ static int sampler(SceSize argc, void *argp) {
     int fails = 0, nbuf = 0;
     ksceIoMkdir("ux0:data/divasplit", 0777);
     SceUID fd = ksceIoOpen(PROF_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+    static prof_header_t h;
+    memset(&h, 0, sizeof(h));
     if (fd >= 0) {
-        prof_header_t h;
-        memset(&h, 0, sizeof(h));
         h.magic = PROF_MAGIC;
         h.version = PROF_VERSION;
         h.header_size = sizeof(h);
@@ -158,9 +173,14 @@ static int sampler(SceSize argc, void *argp) {
         h.stack_words = PROF_STACK_WORDS;
         h.nthreads = g_args.nthreads;
         memcpy(h.names, g_args.names, sizeof(h.names));
-        ksceIoWrite(fd, &h, sizeof(h));
+        memcpy(h.thids, g_args.thids, sizeof(h.thids));
     }
     uint64_t start = ksceKernelGetSystemTimeWide();
+    if (fd >= 0) {
+        h.start_lo = (uint32_t)start;
+        h.start_hi = (uint32_t)(start >> 32);
+        ksceIoWrite(fd, &h, sizeof(h));
+    }
     while (g_run) {
         ksceKernelDelayThread(period);
         if (nbuf + g_args.nthreads > BUF_SAMPLES) {
@@ -168,7 +188,7 @@ static int sampler(SceSize argc, void *argp) {
                 ksceIoWrite(fd, g_buf, nbuf * sizeof(prof_sample_t));
             nbuf = 0;
         }
-        prof_sample_t *first = &g_buf[nbuf];
+        prof_sample_t *first = NULL;
         uint64_t t0 = ksceKernelGetSystemTimeWide();
         if (_suspend_process(g_pid, SUSPEND_REASON) < 0) {
             g_suspend_fail++;
@@ -179,29 +199,35 @@ static int sampler(SceSize argc, void *argp) {
         int32_t frame = 0, stage = -1;
         ksceKernelCopyFromUserProc(g_pid, &frame, (const void *)g_args.frame_addr, 4);
         ksceKernelCopyFromUserProc(g_pid, &stage, (const void *)g_args.stage_addr, 4);
+        int written = 0;
         for (unsigned int t = 0; t < g_args.nthreads; t++) {
-            prof_sample_t *s = &g_buf[nbuf + t];
+            prof_sample_t *s = &g_buf[nbuf + written];
             memset(s, 0, sizeof(*s));
             s->t_us = (uint32_t)(t0 - start);
             s->frame = (uint32_t)frame;
             s->stage = (int8_t)stage;
             s->thread = (uint8_t)t;
-            take(s, g_threads[t], g_args.stack_top[t]);
+            if (take(s, t, g_threads[t], g_args.stack_top[t])) {
+                if (!first)
+                    first = s;
+                written++;
+            }
         }
         _resume_process(g_pid);
         fails = 0;
         uint32_t cost = (uint32_t)(ksceKernelGetSystemTimeWide() - t0);
-        first->cost_us = cost;
+        if (first)
+            first->cost_us = cost;
         g_cost_total += cost;
         if (cost > g_cost_max)
             g_cost_max = cost;
-        if (first->flags & PROF_F_USER)
+        if (first && first->thread == 0 && (first->flags & PROF_F_USER))
             g_user++;
-        if (g_pauses < 4)
+        if (first && g_pauses < 4)
             g_first[g_pauses] = *first;
         g_pauses++;
-        g_samples += g_args.nthreads;
-        nbuf += g_args.nthreads;
+        g_samples += written;
+        nbuf += written;
     }
     if (fd >= 0) {
         if (nbuf)
@@ -229,22 +255,24 @@ static int start(const prof_args_t *uargs) {
     if (g_running)
         return ERR_BUSY;
     reap();   // a sampler that stopped on its own (game exited)
-    prof_args_t a;
-    if (ksceKernelMemcpyUserToKernel(&a, uargs, sizeof(a)) < 0)
+    // the arguments are too big for the system call's stack
+    prof_args_t *a = &g_new_args;
+    if (ksceKernelMemcpyUserToKernel(a, uargs, sizeof(*a)) < 0)
         return ERR_ARGS;
-    if (a.magic != PROF_MAGIC || a.version != PROF_VERSION || a.size != sizeof(a)
-            || a.text_size == 0 || a.rate_hz == 0 || a.rate_hz > 2000
-            || a.nthreads == 0 || a.nthreads > PROF_MAX_THREADS)
+    if (a->magic != PROF_MAGIC || a->version != PROF_VERSION || a->size != sizeof(*a)
+            || a->text_size == 0 || a->rate_hz == 0 || a->rate_hz > 2000
+            || a->nthreads == 0 || a->nthreads > PROF_MAX_THREADS)
         return ERR_ARGS;
     SceUID pid = ksceKernelGetProcessId();
-    for (unsigned int t = 0; t < a.nthreads; t++) {
-        g_threads[t] = kscePUIDtoGUID(pid, a.thids[t]);
+    for (unsigned int t = 0; t < a->nthreads; t++) {
+        g_threads[t] = kscePUIDtoGUID(pid, a->thids[t]);
         if (g_threads[t] < 0)
             return g_threads[t];
-        a.names[t][PROF_NAME_LEN - 1] = 0;
+        a->names[t][PROF_NAME_LEN - 1] = 0;
     }
-    g_args = a;
+    g_args = *a;
     g_pid = pid;
+    memset(g_last_flags, 0xFF, sizeof(g_last_flags));
     g_samples = 0;
     g_pauses = 0;
     g_suspend_fail = g_regs_fail = g_scan_fail = g_user = g_cost_max = 0;

@@ -101,6 +101,7 @@
 #include "threadview.h"
 #include "prof.h"
 #include "opt.h"
+#include "trace.h"
 
 #define STAGE_MAX 32
 
@@ -445,8 +446,13 @@ static void frame_boundary(uint64_t now) {
 
 static int render_stage_hook(int stage) {
     uint64_t t0 = sceKernelGetProcessTimeWide();
+    uint64_t tr0 = trace_on() ? trace_now() : 0;
     g_seen_stage = 1;
     if (stage == 0) {
+        static uint64_t frame_start = 0;
+        if (tr0 && frame_start)
+            trace_add(TR_FRAME, frame_start, tr0, g_frame, 0);
+        frame_start = tr0;
         g_main_thid = sceKernelGetThreadId();
         frame_boundary(t0);
     }
@@ -460,6 +466,8 @@ static int render_stage_hook(int stage) {
     g_cur_stage = stage;
     int ret = TAI_CONTINUE(int, g_ref[HOOK_STAGE], stage);
     g_cur_stage = -1;
+    if (tr0)
+        trace_add(TR_STAGE, tr0, trace_now(), (uint32_t)stage, 0);
     if (stage == g_game->stage_3d) {
         uint64_t busy = sceKernelGetProcessTimeWide() - t0 - (g_gpu_total - w0);
         g_win_3d += busy;
@@ -472,23 +480,32 @@ static int begin_scene_hook(void *ctx, unsigned int flags, const void *rt, const
         void *vsync, void *fsync, const void *color, const void *depth) {
     probe_scene();
     uint64_t t0 = sceKernelGetProcessTimeWide();
+    uint64_t tr0 = trace_on() ? trace_now() : 0;
     int ret = TAI_CONTINUE(int, g_ref[HOOK_BEGIN], ctx, flags, rt, region, vsync, fsync, color, depth);
     g_gpu_total += sceKernelGetProcessTimeWide() - t0;
+    if (tr0)
+        trace_add(TR_GXM_BEGIN, tr0, trace_now(), 0, (uint32_t)__builtin_return_address(0));
     return ret;
 }
 
 static int end_scene_hook(void *ctx, const void *vnotif, const void *fnotif) {
     probe_scene();
     uint64_t t0 = sceKernelGetProcessTimeWide();
+    uint64_t tr0 = trace_on() ? trace_now() : 0;
     int ret = TAI_CONTINUE(int, g_ref[HOOK_END], ctx, vnotif, fnotif);
     g_gpu_total += sceKernelGetProcessTimeWide() - t0;
+    if (tr0)
+        trace_add(TR_GXM_END, tr0, trace_now(), 0, (uint32_t)__builtin_return_address(0));
     return ret;
 }
 
 static int dq_add_entry_hook(void *old_buf, void *new_buf, const void *data) {
     uint64_t t0 = sceKernelGetProcessTimeWide();
+    uint64_t tr0 = trace_on() ? trace_now() : 0;
     int ret = TAI_CONTINUE(int, g_ref[HOOK_DQ], old_buf, new_buf, data);
     g_gpu_total += sceKernelGetProcessTimeWide() - t0;
+    if (tr0)
+        trace_add(TR_GXM_DQ, tr0, trace_now(), 0, (uint32_t)__builtin_return_address(0));
     return ret;
 }
 
@@ -513,9 +530,12 @@ static int wait_vblank_multi_hook(unsigned int vcount) {
         }
     }
     uint64_t t0 = sceKernelGetProcessTimeWide();
+    uint64_t tr0 = trace_on() ? trace_now() : 0;
     int ret = TAI_CONTINUE(int, g_ref[HOOK_VBLANK], vcount);
     g_vs_total += sceKernelGetProcessTimeWide() - t0;
     g_vc_last = (unsigned int)sceDisplayGetVcount();
+    if (tr0)
+        trace_add(TR_VBLANK, tr0, trace_now(), vcount, (uint32_t)__builtin_return_address(0));
     return ret;
 }
 
@@ -619,10 +639,17 @@ static void prof_update(void) {
         a.thids[0] = g_main_thid;
         sceClibStrncpy(a.names[0], "main", PROF_NAME_LEN);
         a.nthreads = 1;
-        static const char *const workers[] = {"RobThread", "diva_task_disp"};
-        for (int w = 0; w < 2 && a.nthreads < PROF_MAX_THREADS; w++)
-            a.nthreads += tv_threads_named(workers[w], &a.thids[a.nthreads], &a.names[a.nthreads],
-                    PROF_MAX_THREADS - a.nthreads);
+        // every game thread divasplit knows of
+        static SceUID ids[PROF_MAX_THREADS];
+        static char names[PROF_MAX_THREADS][32];
+        int n = tv_threads_named("", ids, names, PROF_MAX_THREADS);
+        for (int i = 0; i < n && a.nthreads < PROF_MAX_THREADS; i++) {
+            if (ids[i] == g_main_thid)
+                continue;
+            a.thids[a.nthreads] = ids[i];
+            sceClibStrncpy(a.names[a.nthreads], names[i], PROF_NAME_LEN - 1);
+            a.nthreads++;
+        }
         a.module_nid = g_module_nid;
         a.text_base = g_text_base;
         a.text_size = g_text_size;
@@ -718,6 +745,8 @@ static int input_thread(SceSize args, void *argp) {
         tv_set(g_rec, g_main_thid);
         tv_flush();
         prof_update();
+        trace_set(g_rec);
+        trace_flush();
         sceKernelDelayThread(50 * 1000);
     }
     return 0;
@@ -769,6 +798,9 @@ int module_start(SceSize argc, const void *args) {
     g_opt_on = g_opt == 2 ? 1 : g_opt;
     int opt = opt_init(info.modid, g_game->opt_matmul, &g_opt_on);
     diag("optimizations: matmul %08X", opt);
+    // dev tools, with the profiler kernel plugin installed (an unresolved import returns -1)
+    if (divasplit_prof_stop() >= 0)
+        diag("profiler present, tracer hooks: %d", trace_install());
     if (g_game->probe_ret[0])
         diag("uniform reuse hooks: %08X", probe_install(g_text_base,
                 g_game->probe_ret[0], g_game->probe_ret[1], g_game->probe_ret[2]));
@@ -786,6 +818,7 @@ int module_stop(SceSize argc, const void *args) {
         divasplit_prof_stop();
     tv_shutdown();
     opt_shutdown();
+    trace_shutdown();
     if (g_thread >= 0) {
         g_run = 0;
         sceKernelWaitThreadEnd(g_thread, NULL, NULL);

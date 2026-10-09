@@ -32,7 +32,7 @@ vita_create_self(divasplit_prof.skprx divasplit_prof
 )
 vita_create_stubs(prof_stubs divasplit_prof ${CMAKE_SOURCE_DIR}/prof/divasplit_prof.yml KERNEL)
 
-add_executable(${PROJECT_NAME} src/main.c src/threadview.c src/opt.c)
+add_executable(${PROJECT_NAME} src/main.c src/threadview.c src/opt.c src/trace.c)
 target_link_options(${PROJECT_NAME} PRIVATE -nostdlib)
 add_dependencies(${PROJECT_NAME} prof_stubs)
 
@@ -40,6 +40,7 @@ target_link_libraries(${PROJECT_NAME}
   ${CMAKE_BINARY_DIR}/libdivasplit_prof_stub_weak.a
   taihen_stub
   SceGxm_stub
+  SceSysmem_stub
   SceLibKernel_stub
   SceKernelModulemgr_stub
   SceKernelThreadMgr_stub
