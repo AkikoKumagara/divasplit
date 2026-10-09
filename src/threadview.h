@@ -23,5 +23,8 @@ const char *tv_text(int *len);           // status bar line, empty when off
 void tv_flush(void);                     // input thread: write threads.csv
 // known game threads whose name starts with prefix; returns the count
 int tv_threads_named(const char *prefix, SceUID *ids, char (*names)[32], int max);
+// optimization: the main thread alone on core 1, the game's other threads on
+// cores 0 and 2 (on), or their own masks back (off). Returns threads changed.
+int tv_pin(int on, SceUID main_thid);
 
 #endif

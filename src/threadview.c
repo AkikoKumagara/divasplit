@@ -101,6 +101,52 @@ void tv_thread_seen(SceUID thid) {
 
 static int thread_info(SceUID uid, SceKernelThreadInfo *ti);
 
+/*
+ * Core pinning. The main thread was ready to run but without a core about 5%
+ * of each frame, behind game threads of the same priority. Core 0 has the GXM
+ * display queue thread and core 2 the sound mixer (both pinned by the game),
+ * so the main thread gets core 1 and every game thread that could run anywhere
+ * moves to cores 0 and 2. Threads the game pinned itself stay where they are.
+ */
+#define CORE(n) (SCE_KERNEL_CPU_MASK_USER_0 << (n))
+static SceUID s_pin_ids[MAX_THREADS];
+static int s_pin_masks[MAX_THREADS];
+static int s_npin, s_pinned_state;
+
+int tv_pin(int on, SceUID main_thid) {
+    if (on == s_pinned_state || main_thid <= 0)
+        return 0;
+    int changed = 0;
+    if (on) {
+        s_npin = 0;
+        for (int i = 0; i < s_nthr && s_npin < MAX_THREADS; i++) {
+            SceKernelThreadInfo ti;
+            if (!s_thr[i].alive || thread_info(s_thr[i].uid, &ti) < 0)
+                continue;
+            int mask = ti.currentCpuAffinityMask, want;
+            if (s_thr[i].uid == main_thid)
+                want = CORE(1);
+            else if (mask == 0 || (mask & SCE_KERNEL_CPU_MASK_USER_ALL) == SCE_KERNEL_CPU_MASK_USER_ALL)
+                want = CORE(0) | CORE(2);
+            else
+                continue;
+            if (sceKernelChangeThreadCpuAffinityMask(s_thr[i].uid, want) >= 0) {
+                s_pin_ids[s_npin] = s_thr[i].uid;
+                s_pin_masks[s_npin] = mask;
+                s_npin++;
+                changed++;
+            }
+        }
+    } else {
+        for (int i = 0; i < s_npin; i++)
+            if (sceKernelChangeThreadCpuAffinityMask(s_pin_ids[i], s_pin_masks[i]) >= 0)
+                changed++;
+        s_npin = 0;
+    }
+    s_pinned_state = on;
+    return changed;
+}
+
 int tv_threads_named(const char *prefix, SceUID *ids, char (*names)[32], int max) {
     int n = 0, len = (int)sceClibStrnlen(prefix, 32);
     for (int i = 0; i < s_nthr && n < max; i++) {

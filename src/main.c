@@ -627,8 +627,19 @@ static void settings_poll(void) {
 }
 
 // the profiler runs while recording, when its kernel plugin is installed
+// development tools run while recording only when their switch file exists
+#define PROF_ON_FILE  LOG_DIR "/prof.on"
+#define TRACE_ON_FILE LOG_DIR "/trace.on"
+
+static int file_exists(const char *path) {
+    SceIoStat st;
+    return sceIoGetstat(path, &st) >= 0;
+}
+
 static void prof_update(void) {
     probe_enable(g_rec);
+    if (g_rec && g_prof_state == 0 && g_main_thid > 0 && !file_exists(PROF_ON_FILE))
+        g_prof_state = -1;   // not this time
     if (g_rec && g_prof_state == 0 && g_main_thid > 0) {
         prof_args_t a;
         sceClibMemset(&a, 0, sizeof(a));
@@ -668,6 +679,8 @@ static void prof_update(void) {
         g_prof_state = r >= 0 ? 1 : -1;   // not installed or failed: don't retry this session
         g_prof_on = r >= 0;
         g_dirty = 1;
+    } else if (!g_rec && g_prof_state == -1) {
+        g_prof_state = 0;   // check the switch file again next recording
     } else if (!g_rec && g_prof_state == 1) {
         int n = divasplit_prof_stop();
         diag("profiler stop: %d samples", n);
@@ -745,7 +758,22 @@ static int input_thread(SceSize args, void *argp) {
         tv_set(g_rec, g_main_thid);
         tv_flush();
         prof_update();
-        trace_set(g_rec);
+        {
+            static int trace_rec = -1;   // the switch file, checked when recording starts
+            if (g_rec && trace_rec < 0)
+                trace_rec = file_exists(TRACE_ON_FILE);
+            else if (!g_rec)
+                trace_rec = -1;
+            trace_set(g_rec && trace_rec == 1);
+        }
+        {
+            int moved = tv_pin(g_opt_on == 1, g_main_thid);
+            static int logged = 0;
+            if (moved && logged < 6) {
+                logged++;
+                diag("core pinning %s: %d threads", g_opt_on == 1 ? "on" : "off", moved);
+            }
+        }
         trace_flush();
         sceKernelDelayThread(50 * 1000);
     }
