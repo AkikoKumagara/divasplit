@@ -99,9 +99,11 @@ All numbers are milliseconds per frame, averaged over one second.
 
 ## Recommended setup
 
-- **AVS on.** This alone removes the 60 → 30 drops.
-- **SYNC on**, if you want game speed to stay exact during the remaining dips. The trade-off is a small stutter.
-- **A split preset** only if a PV still drops a lot. 3D 1/2 + AVS held f 2nd's heaviest PV at 59.7 fps on average.
+**AVS on, everything else off, with the CPU and GPU overclocked** (e.g. with PSVshell). This gave the best experience in testing. AVS alone removes the 60 → 30 drops, and the overclock covers most of the remaining dips.
+
+If you can't overclock, or a PV still drops a lot:
+- **A split preset** frees CPU and GPU time, but the PV redraws less smoothly. 3D 1/2 + AVS held f 2nd's heaviest PV at 59.7 fps on average.
+- **SYNC on** keeps game speed exact during dips. The trade-off is a small stutter.
 
 ## VitaGrafix 60 fps patch
 
