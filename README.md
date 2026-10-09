@@ -24,6 +24,22 @@ In any other game or version the plugin stays idle.
 
 You need taiHEN (HENkaku / Ensō) and VitaShell.
 
+### With the installer (easiest)
+
+1. Install `divasplit_installer.vpk` with VitaShell.
+2. Open **divasplit installer**. It shows what's installed and what's out of date.
+3. Press X. It reboots when done.
+
+It installs or updates:
+- `ur0:tai/divasplit.suprx`
+- the plugin lines in the taiHEN config (`ux0:tai/config.txt` if you have one, else `ur0:tai/config.txt`), fixing wrong paths
+- the Quick Menu plugin, if QuickMenuReborn is installed
+- the 60 fps blocks in VitaGrafix's `patchlist.txt` and `FPS=60` in its `config.txt`, if VitaGrafix is installed
+
+Every file it edits is backed up to `<file>.bak` first. TRIANGLE uninstalls the plugin and leaves the VitaGrafix patches in place. Files you put in `ux0:data/divasplit/install/` (for example a test build of `divasplit.suprx`) are used instead of the bundled ones, then deleted.
+
+### By hand
+
 1. Copy `divasplit.suprx` to `ur0:tai/`.
 2. In `ur0:tai/config.txt`, add a section for each game you have:
    ```
@@ -219,7 +235,7 @@ mkdir build && cd build
 cmake .. && make
 ```
 
-This produces `divasplit.suprx` (game plugin) and `divasplit_qm.suprx` (Quick Menu plugin).
+This produces `divasplit.suprx` (game plugin), `divasplit_qm.suprx` (Quick Menu plugin) and `divasplit_installer.vpk`. `installer/test/test_edit.c` tests the installer's file edits on a PC.
 
 ## Credits
 
