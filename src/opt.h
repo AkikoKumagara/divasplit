@@ -26,5 +26,6 @@ void probe_enable(int on);                                // keep counters (reco
 void probe_scene(void);                                   // a scene started or ended
 void probe_take(probe_stats_t *out);                      // read and reset
 int probe_diag(char *buf, int size);                      // cumulative self-checks, for diag.txt
+int probe_diag_first(char *buf, int size, int i);         // the first commits in detail (0: none)
 
 #endif

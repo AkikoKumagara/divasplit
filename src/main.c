@@ -675,6 +675,11 @@ static int input_thread(SceSize args, void *argp) {
                 char line[160];
                 probe_diag(line, sizeof(line));
                 diag("%us opt %d (%d) %s", secs, g_opt, g_opt_on, line);
+                static int shown = 0;
+                while (shown < 4 && probe_diag_first(line, sizeof(line), shown) > 0) {
+                    diag("%us %s", secs, line);
+                    shown++;
+                }
             }
         }
 
