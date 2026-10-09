@@ -21,6 +21,7 @@ In any other game or version the plugin stays idle.
 - **Recording.** One line per second goes to `ux0:data/divasplit/log.csv`.
 - **Thread view** (while recording). It shows how much of the time the main thread is running, ready but waiting for its core, or waiting on something, what it waits on, how busy each CPU core is with game threads, and each game thread's CPU time. It goes to `ux0:data/divasplit/threads.csv` and a second status bar line.
 - **Settings per game**, remembered across launches and changeable from the **Quick Menu** (hold PS).
+- **Development tools** (optional): a sampling profiler and a tracer that turn a recording into a per-thread timeline you can open in [Perfetto](https://ui.perfetto.dev). See [Development tools](#development-tools).
 
 ## Install
 
@@ -38,7 +39,9 @@ It installs or updates:
 - the Quick Menu plugin, if QuickMenuReborn is installed
 - the 60 fps blocks in VitaGrafix's `patchlist.txt` and `FPS=60` in its `config.txt`, if VitaGrafix is installed
 
-Every file it edits is backed up to `<file>.bak` first. TRIANGLE uninstalls the plugin and leaves the VitaGrafix patches in place. Files you put in `ux0:data/divasplit/install/` (for example a test build of `divasplit.suprx`) are used instead of the bundled ones, then deleted.
+Every file it edits is backed up to `<file>.bak` first. TRIANGLE uninstalls the plugin and leaves the VitaGrafix patches in place. SQUARE installs or removes the profiler kernel plugin (see [Development tools](#development-tools)).
+
+Files you put in `ux0:data/divasplit/install/` (for example a test build of `divasplit.suprx`) are used instead of the bundled ones, then deleted. The installer remembers such a test build and never replaces it with the older copy inside the VPK; it shows as "test build (kept)".
 
 ### By hand
 
@@ -68,6 +71,7 @@ Holding PS shows a *divasplit* section with these toggles:
 
 - AVS
 - SYNC
+- Engine optimizations (experiments, see below)
 - Status bar
 - Recording
 - 3D preset button
@@ -84,6 +88,9 @@ Hold **L + R**, then press:
 | LEFT | AVS on / off |
 | UP | SYNC on / off |
 | DOWN | recording + thread view on / off (in X, also shows the game's own profiler) |
+| SELECT | experiments (OPT): off → on → A/B → off |
+
+**OPT** switches the engine experiments in [What we measured](#what-we-measured). None of them made the game faster yet, so it's off by default and only the core pinning experiment is active. **A/B** switches OPT every second while recording; the `opt` column of `log.csv` says which way each second ran, so one recording compares both on nearly the same scenes.
 
 ## Presets
 
@@ -102,7 +109,7 @@ Hold **L + R**, then press:
 SPLIT OFF  SYNC OFF  AVS ON  58fps cpu 13.9 gpu 0.4 vs 2.4 3d 5.6
 ```
 
-All numbers are milliseconds per frame, averaged over one second.
+All numbers are milliseconds per frame, averaged over one second. `REC` (or `REC+PROF` with the profiler running) shows while recording, `OPT` / `OPT A/B` when the experiments are on.
 
 | Field | Meaning |
 |---|---|
@@ -184,6 +191,48 @@ The script lists any site it couldn't find for certain instead of guessing. A po
 | `ux0:data/divasplit/log.csv` | recordings (each run starts with a header line) |
 | `ux0:data/divasplit/threads.csv` | thread view, one block per second: `M` main thread state, `C` per core, `T` per thread (CPU % of one core), `W` what the main thread waits on |
 | `ux0:data/divasplit/diag.txt` | load diagnostics for the current session |
+| `ux0:data/divasplit/prof.bin`, `prof.txt` | profiler samples and stats of the last recording |
+| `ux0:data/divasplit/trace.bin` | tracer records of the last recording |
+| `ux0:data/divasplit/prof.on`, `trace.on` | create these (empty) to run the profiler / tracer while recording |
+| `ux0:data/divasplit/install/` | test builds for the installer |
+
+## Development tools
+
+These are for finding out where the games spend their time. They're not needed to play.
+
+**Profiler.** `divasplit_prof.skprx` is a small kernel plugin, installed with the installer's SQUARE (it goes under `*KERNEL`). At boot it only looks up two functions. While you record, and only if `ux0:data/divasplit/prof.on` exists, divasplit asks it to sample the game: about 500 times a second it pauses the game for ~0.25 ms, reads the registers and the stack return addresses of every game thread divasplit knows (up to 32), and resumes. A thread that is just waiting is written once, not every time. Samples go to `prof.bin`.
+
+**Tracer.** With the profiler installed, divasplit also hooks the game's blocking calls at start (lock / condition / semaphore waits, sleeps, thread joins, the task system's locks, file reads, audio output, GPU and vblank waits). While you record, and only if `ux0:data/divasplit/trace.on` exists, every call that blocks for 20 µs or more goes to `trace.bin` with its thread, duration, object and caller, plus exact frame and render stage boundaries. Tracing is expensive (it pushed f 2nd to 30 fps), so use it to see who waits on whom, not for timings.
+
+**On a PC** (`pip install capstone`, and the decrypted eboot of the same game):
+
+```
+python3 tools/profview.py prof.bin eboot.bin.elf [--stage 3] [--thread 0]
+python3 tools/perfetto.py prof.bin trace.bin eboot.bin.elf -o timeline.json --from 48 --to 53
+```
+
+- `profview.py`: milliseconds per frame by render stage, per function (self and with callees), for normal vs slow frames, and the system calls the game waited in. Functions come from the eboot's unwind table, so every sample maps to the function it was in.
+- `perfetto.py`: a timeline for [ui.perfetto.dev](https://ui.perfetto.dev): frames and render stages on top, then per thread a flame chart of what it ran and a row of its blocking calls. Keep the window to a few seconds; a whole song is a large file.
+
+## What we measured
+
+Project DIVA f 2nd's heaviest PV, EU 1.00, profiled on the Vita. Times are the main thread's, in milliseconds per frame.
+
+- **The main thread is the bottleneck.** In normal frames it works about 12 ms: game update ~3, the 3D world (render stage 3) ~5.5, 2D notes and UI ~2.5, post effects ~0.6. In slow frames only the 3D world grows (+1.8 ms); everything else stays the same.
+- **The other cores are mostly idle.** All game threads together use about 1.3 of the 3 cores games get.
+- **The main thread waits for its workers twice a frame.** It hands the frame's task list to three `diva_task_disp` workers and waits ~1.85 ms for them, then waits ~1 ms for the character threads (`RobThread`). The task workers use per-thread render contexts, and the engine only has three, the first being the main thread's own, so the main thread can't simply join in as a fourth worker.
+- **The 3D world's cost is per draw call**, spread over hundreds of small functions. The single biggest item is copying each draw's vertex uniforms (about 850 copies, 850 KB a frame) into uncached GPU memory: ~1.5 ms.
+
+Experiments that did **not** help (all measured with A/B recordings, kept in the code, off):
+
+| Experiment | Result |
+|---|---|
+| NEON version of the game's 4×4 matrix multiply (bit-identical) | slower: 1.26 ms against 0.8. The function is tiny and called thousands of times a frame; NEON loads of data the game just wrote with scalar stores stall. |
+| Reuse identical uniform blocks (54% of them repeat the previous draw's) | slower by ~0.8 ms: checking that data is unchanged costs about as much as writing it on the Vita |
+| Main thread alone on its own core | slightly slower; it only waited for a free core ~2.5% of the frame |
+| Main thread as a fourth task worker | not possible without a fourth render context (see above) |
+
+So with this engine, the practical tools are AVS, overclocking and, for the worst PVs, a split preset. Engine-level ideas still open: a fourth worker context, and overlapping the two worker hand-offs. Details and addresses are in [`docs/engine-notes.md`](docs/engine-notes.md).
 
 ## How it works
 
@@ -237,7 +286,7 @@ mkdir build && cd build
 cmake .. && make
 ```
 
-This produces `divasplit.suprx` (game plugin), `divasplit_qm.suprx` (Quick Menu plugin) and `divasplit_installer.vpk`. `installer/test/test_edit.c` tests the installer's file edits on a PC.
+This produces `divasplit.suprx` (game plugin), `divasplit_qm.suprx` (Quick Menu plugin), `divasplit_prof.skprx` (profiler kernel plugin) and `divasplit_installer.vpk`. `installer/test/test_edit.c` tests the installer's file edits on a PC.
 
 ## Credits
 
