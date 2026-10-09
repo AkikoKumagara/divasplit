@@ -89,7 +89,7 @@ static int in_text(uint32_t addr) {
 }
 
 // while the game is paused: registers and return addresses on the stack
-static void take(prof_sample_t *s, SceUID thread) {
+static void take(prof_sample_t *s, SceUID thread, uint32_t stack_top) {
     SceThreadCpuRegisters regs;
     memset(&regs, 0, sizeof(regs));
     if (ksceKernelGetThreadCpuRegisters(thread, &regs) < 0) {
@@ -121,10 +121,15 @@ static void take(prof_sample_t *s, SceUID thread) {
     uint32_t sp = u->sp;
     if (sp < 0x80000000 || sp >= 0xE0000000)
         return;
+    // never read past the end of the stack: a failed copy is slow
     int len = SCAN_BYTES;
-    while (len >= 256 && ksceKernelCopyFromUserProc(g_pid, g_scan, (const void *)sp, len) < 0)
-        len /= 2;
-    if (len < 256) {
+    if (stack_top) {
+        if (sp >= stack_top)
+            return;
+        if (stack_top - sp < (uint32_t)len)
+            len = (int)(stack_top - sp) & ~3;
+    }
+    if (len < 4 || ksceKernelCopyFromUserProc(g_pid, g_scan, (const void *)sp, len) < 0) {
         g_scan_fail++;
         return;
     }
@@ -181,7 +186,7 @@ static int sampler(SceSize argc, void *argp) {
             s->frame = (uint32_t)frame;
             s->stage = (int8_t)stage;
             s->thread = (uint8_t)t;
-            take(s, g_threads[t]);
+            take(s, g_threads[t], g_args.stack_top[t]);
         }
         _resume_process(g_pid);
         fails = 0;

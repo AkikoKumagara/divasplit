@@ -29,6 +29,59 @@ static tai_hook_ref_t s_matmul_ref;
 static SceUID s_matmul_hook = -1;
 static volatile int *s_on;
 
+/*
+ * probe: counts the memcpy calls the shader binding makes (f 2nd seg0+0x4DE906,
+ * the uniform upload; 1.5 ms per frame in the profile). Hooks the eboot's
+ * memcpy import only once recording starts; every other call goes straight on.
+ */
+#define NID_LIB_LIBC  0xBE43BB07
+#define NID_MEMCPY    0x7205BFDB
+
+static tai_hook_ref_t s_memcpy_ref;
+static SceUID s_memcpy_hook = -1;
+static uint32_t s_probe_ret;
+static volatile probe_stats_t s_probe;
+
+static void *memcpy_hook(void *dst, const void *src, unsigned int n) {
+    if ((uint32_t)__builtin_return_address(0) == s_probe_ret) {
+        uint32_t d = (uint32_t)dst;
+        s_probe.calls++;
+        s_probe.bytes += n;
+        s_probe.hist[n <= 16 ? 0 : n <= 64 ? 1 : n <= 256 ? 2 : n <= 1024 ? 3 : 4]++;
+        if (d < s_probe.dst_min)
+            s_probe.dst_min = d;
+        if (d > s_probe.dst_max)
+            s_probe.dst_max = d;
+        if (!(d & 15))
+            s_probe.dst_aligned16++;
+    }
+    return TAI_CONTINUE(void *, s_memcpy_ref, dst, src, n);
+}
+
+int probe_start(uint32_t text_base, uint32_t ret_off) {
+    if (s_memcpy_hook >= 0 || !ret_off)
+        return s_memcpy_hook;
+    s_probe.dst_min = 0xFFFFFFFF;
+    s_probe_ret = (text_base + ret_off) | 1;   // Thumb return address
+    s_memcpy_hook = taiHookFunctionImport(&s_memcpy_ref, TAI_MAIN_MODULE, NID_LIB_LIBC, NID_MEMCPY, memcpy_hook);
+    return s_memcpy_hook;
+}
+
+void probe_take(probe_stats_t *out) {
+    out->calls = s_probe.calls;
+    out->bytes = s_probe.bytes;
+    for (int i = 0; i < 5; i++) {
+        out->hist[i] = s_probe.hist[i];
+        s_probe.hist[i] = 0;
+    }
+    out->dst_min = s_probe.dst_min;
+    out->dst_max = s_probe.dst_max;
+    out->dst_aligned16 = s_probe.dst_aligned16;
+    s_probe.calls = s_probe.bytes = s_probe.dst_aligned16 = 0;
+    s_probe.dst_min = 0xFFFFFFFF;
+    s_probe.dst_max = 0;
+}
+
 static float *matmul_neon(float *o, const float *a, const float *b) {
     float32x4_t b0 = vld1q_f32(b), b1 = vld1q_f32(b + 4), b2 = vld1q_f32(b + 8), b3 = vld1q_f32(b + 12);
     float32x4_t r[4];
@@ -62,4 +115,7 @@ void opt_shutdown(void) {
     if (s_matmul_hook >= 0)
         taiHookRelease(s_matmul_hook, s_matmul_ref);
     s_matmul_hook = -1;
+    if (s_memcpy_hook >= 0)
+        taiHookRelease(s_memcpy_hook, s_memcpy_ref);
+    s_memcpy_hook = -1;
 }

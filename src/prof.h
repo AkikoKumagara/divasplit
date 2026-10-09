@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #define PROF_MAGIC        0x46525044   // "DPRF"
-#define PROF_VERSION      3
+#define PROF_VERSION      4
 #define PROF_STACK_WORDS  24
 #define PROF_MAX_THREADS  8
 #define PROF_NAME_LEN     32
@@ -24,6 +24,7 @@ typedef struct {
     uint32_t nthreads;        // threads to sample; [0] is the game's main thread
     int32_t thids[PROF_MAX_THREADS];               // user ids
     char names[PROF_MAX_THREADS][PROF_NAME_LEN];   // for the file header
+    uint32_t stack_top[PROF_MAX_THREADS];          // end of each thread's stack (0: unknown)
     uint32_t module_nid;
     uint32_t text_base, text_size;   // eboot segment 0
     uint32_t frame_addr;      // &g_frame in divasplit (game process address)

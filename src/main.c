@@ -121,7 +121,7 @@
 #define DIAG_FILE LOG_DIR "/diag.txt"
 #define DIAG_HEARTBEAT_S 180   // heartbeat lines for the first 3 minutes
 #define LOG_SLOTS 8
-#define LOG_LINE  256
+#define LOG_LINE  384
 
 typedef struct {
     uint32_t module_nid;
@@ -136,15 +136,16 @@ typedef struct {
     unsigned char stage_3d, stage_fx, stage_setup;   // stage numbers the presets skip
     unsigned char prof_flag; // stage table byte: GPU profiler (sceGxmFinish around stages)
     uint32_t opt_matmul;     // seg0 offset of the 4x4 matrix multiply (0: off, see opt.c)
+    uint32_t probe_ret;      // seg0 offset after the uniform upload memcpy call (0: unknown)
 } game_t;
 
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
-    {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0},
+    {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0, 0},
     // f: FM 0x816E7228, stage table 0x818F8B58 (seg1 0x81689000)
-    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0},
+    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, 0},
     // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
-    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0},
+    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, 0x4DE90A},
 };
 #define GAME_COUNT (int)(sizeof(GAMES) / sizeof(GAMES[0]))
 
@@ -235,6 +236,8 @@ typedef struct {
     int prof10[PROF_COUNT];
 } perf_t;
 static volatile perf_t g_perf;
+static probe_stats_t g_probe;          // last window, render thread
+static unsigned int g_probe_frames;
 
 // status line, double buffered: the display thread draws g_text[g_text_idx]
 static char g_text[2][LINE_CHARS + 1];
@@ -321,6 +324,13 @@ static void log_line(uint64_t now) {
     } else {
         n += sceClibSnprintf(line + n, LOG_LINE - n, ",,,,,,,");
     }
+    if (g_probe.calls && g_probe_frames && n < LOG_LINE - 64) {
+        const probe_stats_t *p = &g_probe;
+        n += sceClibSnprintf(line + n, LOG_LINE - n, ",%u,%u,%u,%u,%u,%u,%u,%u,%08X,%08X",
+                p->calls / g_probe_frames, p->bytes / g_probe_frames,
+                p->hist[0], p->hist[1], p->hist[2], p->hist[3], p->hist[4],
+                p->dst_aligned16, (unsigned)p->dst_min, (unsigned)p->dst_max);
+    }
     line[n++] = '\n';
     g_log_len[head % LOG_SLOTS] = n;
     __sync_synchronize();
@@ -334,7 +344,8 @@ static void log_flush(void) {
         if (g_log_fd >= 0) {
             static const char hdr[] = "# divasplit 1.9 recording\n"
                 "t,game,preset,sync,avs,opt,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap,"
-                "main_run,main_ready,main_wait,core0,core1,core2,core3\n";
+                "main_run,main_ready,main_wait,core0,core1,core2,core3,"
+                "up_calls,up_bytes,up_16,up_64,up_256,up_1k,up_more,up_al16,up_dst_min,up_dst_max\n";
             sceIoWrite(g_log_fd, hdr, sizeof(hdr) - 1);
         }
     }
@@ -382,6 +393,8 @@ static void frame_boundary(uint64_t now) {
 
     int dirty = g_dirty;
     if (dirty) {
+        probe_stats_t drop;
+        probe_take(&drop);   // the new window starts clean
         g_dirty = 0;
         g_perf.valid = 0;   // old numbers belong to the old setting
         update_text();
@@ -406,6 +419,8 @@ static void frame_boundary(uint64_t now) {
     g_perf.late = (int)(g_late_total - g_win_late_start);
     for (int k = 0; k < PROF_COUNT; k++)
         g_perf.prof10[k] = (int)(g_win_prof[k] / g_win_frames / 100);
+    probe_take(&g_probe);
+    g_probe_frames = g_win_frames;
     g_perf.valid = 1;
     update_text();
     if (g_rec)
@@ -579,6 +594,11 @@ static void settings_poll(void) {
 
 // the profiler runs while recording, when its kernel plugin is installed
 static void prof_update(void) {
+    static int probe = 0;
+    if (g_rec && !probe && g_text_base) {
+        probe = 1;
+        diag("uniform upload probe: %08X", probe_start(g_text_base, g_game->probe_ret));
+    }
     if (g_rec && g_prof_state == 0 && g_main_thid > 0) {
         prof_args_t a;
         sceClibMemset(&a, 0, sizeof(a));
@@ -599,6 +619,13 @@ static void prof_update(void) {
         a.frame_addr = (uint32_t)&g_frame;
         a.stage_addr = (uint32_t)&g_cur_stage;
         a.rate_hz = 500;
+        for (unsigned int t = 0; t < a.nthreads; t++) {
+            SceKernelThreadInfo ti;
+            sceClibMemset(&ti, 0, sizeof(ti));
+            ti.size = sizeof(ti);
+            if (sceKernelGetThreadInfo(a.thids[t], &ti) >= 0)
+                a.stack_top[t] = (uint32_t)ti.stack + (uint32_t)ti.stackSize;
+        }
         int r = divasplit_prof_start(&a);
         diag("profiler start: %08X (%u threads)", r, (unsigned)a.nthreads);
         g_prof_state = r >= 0 ? 1 : -1;   // not installed or failed: don't retry this session
