@@ -135,16 +135,16 @@ typedef struct {
     int has_profiler;        // FM keeps the X profiler slots
     unsigned char stage_3d, stage_fx, stage_setup;   // stage numbers the presets skip
     unsigned char prof_flag; // stage table byte: GPU profiler (sceGxmFinish around stages)
-    uint32_t opt_matmul;     // seg0 offset of the 4x4 matrix multiply (0: not known)
+    uint32_t opt_matmul;     // seg0 offset of the 4x4 matrix multiply (0: off, see opt.c)
 } game_t;
 
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
     {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0},
     // f: FM 0x816E7228, stage table 0x818F8B58 (seg1 0x81689000)
-    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0x3CCB02},
+    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0},
     // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
-    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0x4D0FDE},
+    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0},
 };
 #define GAME_COUNT (int)(sizeof(GAMES) / sizeof(GAMES[0]))
 
@@ -585,7 +585,14 @@ static void prof_update(void) {
         a.magic = PROF_MAGIC;
         a.version = PROF_VERSION;
         a.size = sizeof(a);
-        a.main_thid = g_main_thid;
+        // the main thread and the workers it waits for
+        a.thids[0] = g_main_thid;
+        sceClibStrncpy(a.names[0], "main", PROF_NAME_LEN);
+        a.nthreads = 1;
+        static const char *const workers[] = {"RobThread", "diva_task_disp"};
+        for (int w = 0; w < 2 && a.nthreads < PROF_MAX_THREADS; w++)
+            a.nthreads += tv_threads_named(workers[w], &a.thids[a.nthreads], &a.names[a.nthreads],
+                    PROF_MAX_THREADS - a.nthreads);
         a.module_nid = g_module_nid;
         a.text_base = g_text_base;
         a.text_size = g_text_size;
@@ -593,7 +600,7 @@ static void prof_update(void) {
         a.stage_addr = (uint32_t)&g_cur_stage;
         a.rate_hz = 500;
         int r = divasplit_prof_start(&a);
-        diag("profiler start: %08X", r);
+        diag("profiler start: %08X (%u threads)", r, (unsigned)a.nthreads);
         g_prof_state = r >= 0 ? 1 : -1;   // not installed or failed: don't retry this session
         g_prof_on = r >= 0;
         g_dirty = 1;

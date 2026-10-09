@@ -12,6 +12,13 @@
  *           as in the game, so out may be A or B.
  *           f: seg0+0x3CCB02, f 2nd: seg0+0x4D0FDE. About 0.4-0.6 ms per frame
  *           of the f 2nd 3D stage.
+ *
+ *           Measured on f 2nd: SLOWER, 1.26 ms per frame against the game's
+ *           ~0.8. The function is tiny and called thousands of times a frame,
+ *           so memory traffic dominates: the 128-bit NEON load of the input
+ *           waits for the game's 32-bit VFP stores that just wrote it, and the
+ *           compiler's stack copy of the result stalls the same way. Not
+ *           enabled for any game (opt_matmul = 0 in GAMES[]).
  */
 #include <arm_neon.h>
 #include <taihen.h>

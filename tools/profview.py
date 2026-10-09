@@ -28,7 +28,8 @@ from thumbelf import VitaElf
 PROF_MAGIC = 0x46525044
 F_USER, F_REGS, F_STACK, F_SYSCALL = 1, 2, 4, 8
 HEADER = struct.Struct('<16I')
-SAMPLE_HEAD = struct.Struct('<IIhBBIIIIIII')   # t, frame, stage, flags, nstack, pc, lr, sp, cpsr, kpc, kcpsr, cost
+SAMPLE_HEAD_V1 = struct.Struct('<IIhBBIIIIIII')   # t, frame, stage, flags, nstack, pc, lr, sp, cpsr, kpc, kcpsr, cost
+SAMPLE_HEAD_V3 = struct.Struct('<IIbBBBIIIIIII')  # t, frame, stage, thread, flags, nstack, ...
 
 # functions we already know, by module NID
 KNOWN = {
@@ -116,18 +117,28 @@ class Code:
 
 
 def load(path):
+    """Header dict and samples as (t, frame, stage, flags, nstack, pc, lr, sp, cpsr,
+    kpc, kcpsr, cost, stack, thread)."""
     data = open(path, 'rb').read()
     h = HEADER.unpack_from(data, 0)
     magic, version, header_size, sample_size, rate, nid, text_base, text_size, stack_words = h[:9]
     if magic != PROF_MAGIC:
         sys.exit(f'{path}: not a divasplit profiler file')
+    names = ['main']
+    if version >= 3:
+        n = h[9]
+        names = [data[64 + 32 * i:64 + 32 * (i + 1)].split(b'\0')[0].decode('latin1') for i in range(n)]
     stack = struct.Struct(f'<{stack_words}I')
     samples = []
     for off in range(header_size, len(data) - sample_size + 1, sample_size):
-        s = SAMPLE_HEAD.unpack_from(data, off)
-        st = stack.unpack_from(data, off + SAMPLE_HEAD.size)
-        samples.append(s + (st[:s[4]],))
-    return dict(rate=rate, nid=nid, text_base=text_base, text_size=text_size), samples
+        if version >= 3:
+            v = SAMPLE_HEAD_V3.unpack_from(data, off)
+            s, thread = v[:3] + v[4:], v[3]
+        else:
+            s, thread = SAMPLE_HEAD_V1.unpack_from(data, off), 0
+        st = stack.unpack_from(data, off + SAMPLE_HEAD_V1.size)
+        samples.append(s + (st[:s[4]], thread))
+    return dict(rate=rate, nid=nid, text_base=text_base, text_size=text_size, threads=names), samples
 
 
 def main():
@@ -137,9 +148,16 @@ def main():
     ap.add_argument('--heavy-ms', type=float, default=18.0, help='frames longer than this are heavy (default 18)')
     ap.add_argument('--top', type=int, default=25)
     ap.add_argument('--stage', type=int, help='only samples taken in this render stage')
+    ap.add_argument('--thread', default='0', help='thread to report on: index or name (default 0, the main thread)')
     args = ap.parse_args()
 
-    hdr, samples = load(args.prof)
+    hdr, all_samples = load(args.prof)
+    names = hdr['threads']
+    thread = int(args.thread) if args.thread.isdigit() else next(
+        (i for i, n in enumerate(names) if args.thread.lower() in n.lower()), None)
+    if thread is None or thread >= len(names):
+        sys.exit(f'no thread {args.thread}; sampled: ' + ', '.join(f'{i} {n}' for i, n in enumerate(names)))
+    samples = [s for s in all_samples if s[13] == thread]
     code = Code(args.elf)
     if code.elf.module_nid != hdr['nid']:
         print(f'warning: recording is from module NID 0x{hdr["nid"]:08X}, the ELF is 0x{code.elf.module_nid:08X}')
@@ -160,7 +178,7 @@ def main():
     light = {f for f, ms in frame_ms.items() if ms <= args.heavy_ms}
 
     def where(s):
-        t, frame, stage, flags, n, pc, lr, sp, cpsr, kpc, kcpsr, cost, stack = s
+        t, frame, stage, flags, n, pc, lr, sp, cpsr, kpc, kcpsr, cost, stack, _ = s
         if not flags & F_REGS:
             return '[no registers]', [], 'wait'
         rets = []
@@ -203,7 +221,6 @@ def main():
             continue
         if args.stage is not None and stage != args.stage:
             continue
-        pauses.append(s[11])
         self_f, rets, kind = where(s)
         if kind == 'lib' and rets:
             lib_callers[rets[0]] += 1
@@ -225,10 +242,19 @@ def main():
 
     total = sum(stage_c['all'].values())
     avg = lambda fs: sum(frame_ms[f] for f in fs) / len(fs) if fs else 0
+    if len(names) > 1:
+        print('sampled threads, ms per frame (cpu = running in the game or a library, kernel = waiting or in a system call):')
+        for i, n in enumerate(names):
+            ts = [x for x in all_samples if x[13] == i and x[1] in frame_ms]
+            cpu = sum(1 for x in ts if x[3] & F_USER) * period_ms / len(frame_ms)
+            ker = sum(1 for x in ts if not x[3] & F_USER) * period_ms / len(frame_ms)
+            print(f'  {i} {n:34s} cpu {cpu:5.2f}  kernel {ker:5.2f}')
+        print(f'reporting on thread {thread} ({names[thread]})\n')
     print(f'{len(samples)} samples, one per {period_ms:.2f} ms (nominal {hdr["rate"]} Hz), {total} in complete frames'
           + (f' of stage {args.stage}' if args.stage is not None else ''))
     print(f'frames: {len(frame_ms)}, light {len(light)} (avg {avg(light):.1f} ms), '
           f'heavy > {args.heavy_ms:g} ms {len(heavy)} (avg {avg(heavy):.1f} ms)')
+    pauses = [x[11] for x in all_samples if x[13] == 0]
     if pauses:
         print(f'profiler pause per sample: avg {sum(pauses) / len(pauses):.0f} us, max {max(pauses)} us')
 

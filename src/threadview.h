@@ -21,5 +21,7 @@ void tv_thread_seen(SceUID thid);        // hooks: a thread of the game
 void tv_get(tv_summary_t *out);
 const char *tv_text(int *len);           // status bar line, empty when off
 void tv_flush(void);                     // input thread: write threads.csv
+// known game threads whose name starts with prefix; returns the count
+int tv_threads_named(const char *prefix, SceUID *ids, char (*names)[32], int max);
 
 #endif

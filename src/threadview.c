@@ -99,6 +99,24 @@ void tv_thread_seen(SceUID thid) {
     s_pend[i % PEND_SLOTS] = thid;
 }
 
+static int thread_info(SceUID uid, SceKernelThreadInfo *ti);
+
+int tv_threads_named(const char *prefix, SceUID *ids, char (*names)[32], int max) {
+    int n = 0, len = (int)sceClibStrnlen(prefix, 32);
+    for (int i = 0; i < s_nthr && n < max; i++) {
+        SceKernelThreadInfo ti;
+        if (!s_thr[i].alive || thread_info(s_thr[i].uid, &ti) < 0)
+            continue;
+        if (sceClibStrncmp(ti.name, prefix, len) != 0)
+            continue;
+        ids[n] = s_thr[i].uid;
+        sceClibStrncpy(names[n], ti.name, 31);
+        names[n][31] = 0;
+        n++;
+    }
+    return n;
+}
+
 void tv_set(int on, SceUID main_thid) {
     s_main = main_thid;
     s_on = on && main_thid > 0;
