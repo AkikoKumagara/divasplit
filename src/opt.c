@@ -39,7 +39,9 @@ static volatile int *s_on;
  * Every block is hashed; "same" counts blocks identical to the previous one in
  * the same scene, which could point at the previous buffer
  * (sceGxmSetVertexDefaultUniformBuffer) instead of being copied again.
- * Hooks go in once recording starts; other callers go straight on.
+ * The hooks go in at game start, only with the profiler installed (a dev
+ * setup): patching these imports while the game calls them ~2000 times a
+ * frame crashed it. They count only while recording.
  */
 #define NID_LIB_LIBC       0xBE43BB07
 #define NID_MEMCPY         0x7205BFDB
@@ -52,6 +54,7 @@ static tai_hook_ref_t s_probe_ref[PH_COUNT];
 static SceUID s_probe_hook[PH_COUNT] = {-1, -1, -1};
 static uint32_t s_ret[PH_COUNT];
 static volatile probe_stats_t s_probe;
+static volatile int s_probe_on;
 
 // block being filled, and the previous one
 static uint32_t s_cur_hash, s_cur_bytes, s_prev_hash, s_prev_bytes;
@@ -93,7 +96,7 @@ void probe_scene(void) {
 }
 
 static void *memcpy_hook(void *dst, const void *src, unsigned int n) {
-    if ((uint32_t)__builtin_return_address(0) == s_ret[PH_MEMCPY]) {
+    if (s_probe_on && (uint32_t)__builtin_return_address(0) == s_ret[PH_MEMCPY]) {
         uint32_t d = (uint32_t)dst;
         s_probe.calls++;
         s_probe.bytes += n;
@@ -113,7 +116,7 @@ static void *memcpy_hook(void *dst, const void *src, unsigned int n) {
 }
 
 static int reserve_hook(void *ctx, void **buf) {
-    int ours = (uint32_t)__builtin_return_address(0) == s_ret[PH_RESERVE];
+    int ours = s_probe_on && (uint32_t)__builtin_return_address(0) == s_ret[PH_RESERVE];
     if (ours)
         block_close();
     int ret = TAI_CONTINUE(int, s_probe_ref[PH_RESERVE], ctx, buf);
@@ -127,14 +130,20 @@ static int reserve_hook(void *ctx, void **buf) {
 }
 
 static int setdata_hook(void *buf, const void *param, unsigned int offset, unsigned int count, const float *src) {
-    if ((uint32_t)__builtin_return_address(0) == s_ret[PH_SETDATA] && s_cur_open) {
+    if (s_probe_on && (uint32_t)__builtin_return_address(0) == s_ret[PH_SETDATA] && s_cur_open) {
         s_cur_hash = hash_bytes(s_cur_hash ^ (uint32_t)param ^ (offset << 16), src, count * 4);
         s_cur_bytes += count * 4;
     }
     return TAI_CONTINUE(int, s_probe_ref[PH_SETDATA], buf, param, offset, count, src);
 }
 
-int probe_start(uint32_t text_base, uint32_t memcpy_ret, uint32_t reserve_ret, uint32_t setdata_ret) {
+void probe_enable(int on) {
+    if (!on)
+        s_cur_open = 0;
+    s_probe_on = on;
+}
+
+int probe_install(uint32_t text_base, uint32_t memcpy_ret, uint32_t reserve_ret, uint32_t setdata_ret) {
     if (s_probe_hook[PH_MEMCPY] >= 0 || !memcpy_ret)
         return s_probe_hook[PH_MEMCPY];
     s_probe.dst_min = 0xFFFFFFFF;

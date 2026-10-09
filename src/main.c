@@ -600,12 +600,7 @@ static void settings_poll(void) {
 
 // the profiler runs while recording, when its kernel plugin is installed
 static void prof_update(void) {
-    static int probe = 0;
-    if (g_rec && !probe && g_text_base) {
-        probe = 1;
-        diag("uniform upload probe: %08X", probe_start(g_text_base, g_game->probe_ret[0],
-                g_game->probe_ret[1], g_game->probe_ret[2]));
-    }
+    probe_enable(g_rec);
     if (g_rec && g_prof_state == 0 && g_main_thid > 0) {
         prof_args_t a;
         sceClibMemset(&a, 0, sizeof(a));
@@ -759,6 +754,10 @@ int module_start(SceSize argc, const void *args) {
             g_hook[HOOK_END], g_hook[HOOK_DQ], g_hook[HOOK_VBLANK], g_hook[HOOK_THREAD]);
     int opt = opt_init(info.modid, g_game->opt_matmul, &g_opt);
     diag("optimizations: matmul %08X", opt);
+    // dev tools: the profiler kernel plugin answers (an unresolved import returns -1)
+    if (divasplit_prof_stop() >= 0 && g_game->probe_ret[0])
+        diag("profiler present, uniform upload probe: %08X", probe_install(g_text_base,
+                g_game->probe_ret[0], g_game->probe_ret[1], g_game->probe_ret[2]));
     tv_init(diag);
 
     update_text();

@@ -19,9 +19,11 @@ typedef struct {
     uint32_t same, same_bytes; // identical to the previous draw's block, same scene
 } probe_stats_t;
 
-// hooks the shader binding's memcpy / reserve / SetUniformDataF (once);
-// offsets are seg0 offsets of the return addresses of those three calls
-int probe_start(uint32_t text_base, uint32_t memcpy_ret, uint32_t reserve_ret, uint32_t setdata_ret);
+// hooks the shader binding's memcpy / reserve / SetUniformDataF; offsets are
+// seg0 offsets of the return addresses of those three calls. Call from
+// module_start: patching these hot imports while the game runs crashes it.
+int probe_install(uint32_t text_base, uint32_t memcpy_ret, uint32_t reserve_ret, uint32_t setdata_ret);
+void probe_enable(int on);                                // count only while recording
 void probe_scene(void);                                   // a scene started: no reuse across
 void probe_take(probe_stats_t *out);                      // read and reset
 
