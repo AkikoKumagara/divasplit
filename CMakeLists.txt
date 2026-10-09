@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.13)
 
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   if(DEFINED ENV{VITASDK})
@@ -12,9 +12,9 @@ project(divasplit C)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O2 -std=gnu99")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -nostdlib")
 
-add_executable(${PROJECT_NAME} src/main.c)
+add_executable(${PROJECT_NAME} src/main.c src/threadview.c)
+target_link_options(${PROJECT_NAME} PRIVATE -nostdlib)
 
 target_link_libraries(${PROJECT_NAME}
   taihen_stub
@@ -27,6 +27,9 @@ target_link_libraries(${PROJECT_NAME}
   gcc
 )
 
+# vita.cmake appends to these in the caller's scope: start each module clean
+unset(VITA_ELF_CREATE_FLAGS)
+unset(VITA_MAKE_FSELF_FLAGS)
 vita_create_self(${PROJECT_NAME}.suprx ${PROJECT_NAME}
   UNSAFE
   CONFIG ${CMAKE_SOURCE_DIR}/${PROJECT_NAME}.yml
@@ -34,6 +37,7 @@ vita_create_self(${PROJECT_NAME}.suprx ${PROJECT_NAME}
 
 # Quick Menu toggles (SceShell side, needs QuickMenuReborn)
 add_executable(divasplit_qm qm/src/main.c)
+target_link_options(divasplit_qm PRIVATE -nostdlib)
 target_include_directories(divasplit_qm PRIVATE qm/include src)
 
 target_link_libraries(divasplit_qm
@@ -43,7 +47,41 @@ target_link_libraries(divasplit_qm
   gcc
 )
 
+# vita.cmake appends to these in the caller's scope: start each module clean
+unset(VITA_ELF_CREATE_FLAGS)
+unset(VITA_MAKE_FSELF_FLAGS)
 vita_create_self(divasplit_qm.suprx divasplit_qm
   UNSAFE
   CONFIG ${CMAKE_SOURCE_DIR}/qm/divasplit_qm.yml
+)
+
+# Installer app: installs / updates everything above and the VitaGrafix blocks
+add_executable(divasplit_installer installer/src/main.c installer/src/edit.c)
+target_include_directories(divasplit_installer PRIVATE src installer/src)
+
+target_link_libraries(divasplit_installer
+  SceDisplay_stub
+  SceCtrl_stub
+  ScePower_stub
+  SceLibKernel_stub
+  SceIofilemgr_stub
+  SceKernelThreadMgr_stub
+)
+
+# vita.cmake appends to these in the caller's scope: start each module clean
+unset(VITA_ELF_CREATE_FLAGS)
+unset(VITA_MAKE_FSELF_FLAGS)
+vita_create_self(eboot.bin divasplit_installer UNSAFE)
+vita_create_vpk(divasplit_installer.vpk DVSP00001 eboot.bin
+  VERSION 01.08
+  NAME "divasplit installer"
+  FILE installer/sce_sys/icon0.png sce_sys/icon0.png
+  FILE installer/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
+  FILE installer/sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
+  FILE installer/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+  FILE ${CMAKE_BINARY_DIR}/divasplit.suprx payload/divasplit.suprx
+  FILE ${CMAKE_BINARY_DIR}/divasplit_qm.suprx payload/divasplit_qm.suprx
+  FILE vitagrafix/divax.txt payload/vitagrafix/divax.txt
+  FILE vitagrafix/divaf.txt payload/vitagrafix/divaf.txt
+  FILE vitagrafix/divaf2nd.txt payload/vitagrafix/divaf2nd.txt
 )

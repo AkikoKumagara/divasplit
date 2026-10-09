@@ -68,6 +68,11 @@
  * ux0:data/divasplit/log.csv. The render thread only formats the line into a
  * small ring buffer; the low-priority input thread does the file writes.
  *
+ * Recording also turns on the thread view (threadview.c): the main thread's
+ * running / ready / waiting split, what it waits on, per-core load and every
+ * game thread's CPU time, into ux0:data/divasplit/threads.csv and a second
+ * status bar line. sceKernelCreateThread is hooked to find the game threads.
+ *
  * Font: Terminus 8x14 Bold (SIL OFL 1.1), taken from Electry's PSVshell.
  */
 #include <psp2/kernel/modulemgr.h>
@@ -83,6 +88,7 @@
 
 #include "font_ter_u14b.h"
 #include "settings.h"
+#include "threadview.h"
 
 #define STAGE_MAX 32
 
@@ -94,6 +100,8 @@
 #define NID_SET_FRAME_BUF      0x7A410B64
 #define NID_LIB_DISPLAY        0x5ED8F994
 #define NID_WAIT_VBLANK_MULTI  0xDD0A13B8
+#define NID_LIB_KERNEL         0xCAE9ACE6
+#define NID_CREATE_THREAD      0xC5C11EE7
 
 #define FONT_W 8
 #define FONT_H 14
@@ -104,7 +112,7 @@
 #define DIAG_FILE LOG_DIR "/diag.txt"
 #define DIAG_HEARTBEAT_S 180   // heartbeat lines for the first 3 minutes
 #define LOG_SLOTS 8
-#define LOG_LINE  192
+#define LOG_LINE  256
 
 typedef struct {
     uint32_t module_nid;
@@ -135,9 +143,9 @@ static const unsigned short PROF_OFF[PROF_COUNT] = {0x60, 0x118, 0x138, 0x148, 0
 static const char *const PROF_LABEL[PROF_COUNT] = {
     " upd ", " (a ", " b ", " c ", ") draw ", " (p ", " l ", " r ", ") swap "};
 
-enum { HOOK_STAGE, HOOK_FB, HOOK_BEGIN, HOOK_END, HOOK_DQ, HOOK_VBLANK, HOOK_COUNT };
+enum { HOOK_STAGE, HOOK_FB, HOOK_BEGIN, HOOK_END, HOOK_DQ, HOOK_VBLANK, HOOK_THREAD, HOOK_COUNT };
 static tai_hook_ref_t g_ref[HOOK_COUNT];
-static SceUID g_hook[HOOK_COUNT] = {-1, -1, -1, -1, -1, -1};
+static SceUID g_hook[HOOK_COUNT] = {-1, -1, -1, -1, -1, -1, -1};
 
 static const game_t *g_game = NULL;
 static uintptr_t g_seg1 = 0;
@@ -286,6 +294,17 @@ static void log_line(uint64_t now) {
             MS(g_perf.fps10), MS(g_perf.cpu10), MS(g_perf.gpu10), MS(g_perf.vs10), MS(g_perf.s3d10));
     for (int k = 0; k < PROF_COUNT && n < LOG_LINE - 16; k++)
         n += sceClibSnprintf(line + n, LOG_LINE - n, ",%d.%d", MS(g_perf.prof10[k]));
+    tv_summary_t tv;
+    tv_get(&tv);
+    if (tv.valid) {
+        n += sceClibSnprintf(line + n, LOG_LINE - n, ",%d.%d,%d.%d,%d.%d",
+                MS(tv.run10), MS(tv.ready10), MS(tv.wait10));
+        for (int c = 0; c < TV_CORES && n < LOG_LINE - 16; c++)
+            n += tv.core10[c] < 0 ? sceClibSnprintf(line + n, LOG_LINE - n, ",")
+                                  : sceClibSnprintf(line + n, LOG_LINE - n, ",%d.%d", MS(tv.core10[c]));
+    } else {
+        n += sceClibSnprintf(line + n, LOG_LINE - n, ",,,,,,,");
+    }
     line[n++] = '\n';
     g_log_len[head % LOG_SLOTS] = n;
     __sync_synchronize();
@@ -297,8 +316,9 @@ static void log_flush(void) {
         sceIoMkdir(LOG_DIR, 0777);
         g_log_fd = sceIoOpen(LOG_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0666);
         if (g_log_fd >= 0) {
-            static const char hdr[] = "# divasplit 1.7 recording\n"
-                "t,game,preset,sync,avs,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap\n";
+            static const char hdr[] = "# divasplit 1.8 recording\n"
+                "t,game,preset,sync,avs,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap,"
+                "main_run,main_ready,main_wait,core0,core1,core2,core3\n";
             sceIoWrite(g_log_fd, hdr, sizeof(hdr) - 1);
         }
     }
@@ -428,7 +448,13 @@ static int dq_add_entry_hook(void *old_buf, void *new_buf, const void *data) {
 }
 
 static int wait_vblank_multi_hook(unsigned int vcount) {
-    if (sceKernelGetThreadId() != g_main_thid) {   // e.g. f's loading loop waits 2 vblanks
+    SceUID thid = sceKernelGetThreadId();
+    if (thid != g_main_thid) {   // e.g. f's loading loop waits 2 vblanks
+        static SceUID last_other = -1;
+        if (thid != last_other) {
+            last_other = thid;
+            tv_thread_seen(thid);
+        }
         g_vb_other++;
         return TAI_CONTINUE(int, g_ref[HOOK_VBLANK], vcount);
     }
@@ -448,16 +474,22 @@ static int wait_vblank_multi_hook(unsigned int vcount) {
     return ret;
 }
 
-static void draw_text(const SceDisplayFrameBuf *fb) {
-    int idx = g_text_idx;
-    int len = g_text_len[idx];
-    const char *text = g_text[idx];
+static SceUID create_thread_hook(const char *name, SceKernelThreadEntry entry, int prio,
+        SceSize stack, SceUInt32 attr, int mask, const SceKernelThreadOptParam *opt) {
+    SceUID ret = TAI_CONTINUE(SceUID, g_ref[HOOK_THREAD], name, entry, prio, stack, attr, mask, opt);
+    if (ret >= 0)
+        tv_thread_seen(ret);
+    return ret;
+}
+
+// line 0 is the bottom line
+static void draw_line(const SceDisplayFrameBuf *fb, const char *text, int len, int line) {
     if (len <= 0 || fb->pixelformat != SCE_DISPLAY_PIXELFORMAT_A8B8G8R8)
         return;
-    if ((int)fb->width < len * FONT_W + 8 || (int)fb->height < FONT_H + 8)
+    if ((int)fb->width < len * FONT_W + 8 || (int)fb->height < (line + 1) * (FONT_H + 2) + 8)
         return;
     uint32_t *base = (uint32_t *)fb->base;
-    int y0 = fb->height - FONT_H - 4;
+    int y0 = fb->height - FONT_H - 4 - line * (FONT_H + 2);
     for (int y = 0; y < FONT_H; y++) {
         uint32_t *row = base + (y0 + y) * fb->pitch + 4;
         for (int c = 0; c < len; c++) {
@@ -468,7 +500,22 @@ static void draw_text(const SceDisplayFrameBuf *fb) {
     }
 }
 
+static void draw_text(const SceDisplayFrameBuf *fb) {
+    int idx = g_text_idx;
+    draw_line(fb, g_text[idx], g_text_len[idx], 0);
+    int len;
+    const char *tv = tv_text(&len);
+    if (g_rec)
+        draw_line(fb, tv, len, 1);
+}
+
 static int set_frame_buf_hook(const SceDisplayFrameBuf *pParam, SceDisplaySetBufSync sync) {
+    static SceUID last_thid = -1;   // the GXM display queue thread
+    SceUID thid = sceKernelGetThreadId();
+    if (thid != last_thid) {
+        last_thid = thid;
+        tv_thread_seen(thid);
+    }
     if (!g_seen_fb && pParam) {
         g_fb_info = *pParam;
         g_seen_fb = 1;
@@ -567,6 +614,8 @@ static int input_thread(SceSize args, void *argp) {
             settings_poll();
         }
         log_flush();
+        tv_set(g_rec, g_main_thid);
+        tv_flush();
         sceKernelDelayThread(50 * 1000);
     }
     return 0;
@@ -578,7 +627,7 @@ int module_start(SceSize argc, const void *args) {
     info.size = sizeof(info);
     g_start_time = sceKernelGetProcessTimeWide();
     if (taiGetModuleInfo(TAI_MAIN_MODULE, &info) < 0) {
-        diag("== divasplit 1.7: taiGetModuleInfo failed");
+        diag("== divasplit 1.8: taiGetModuleInfo failed");
         return SCE_KERNEL_START_SUCCESS;
     }
     for (int i = 0; i < GAME_COUNT; i++)
@@ -586,7 +635,7 @@ int module_start(SceSize argc, const void *args) {
             g_game = &GAMES[i];
     if (!g_game)
         return SCE_KERNEL_START_SUCCESS;   // not a build we know: do nothing
-    diag("== divasplit 1.7: %s nid %08X -> %s", info.name, (unsigned)info.module_nid, game_tag());
+    diag("== divasplit 1.8: %s nid %08X -> %s", info.name, (unsigned)info.module_nid, game_tag());
 
     // remembered settings; recording never carries over to a new session
     settings_load(&g_settings);
@@ -607,9 +656,11 @@ int module_start(SceSize argc, const void *args) {
     g_hook[HOOK_END] = taiHookFunctionImport(&g_ref[HOOK_END], TAI_MAIN_MODULE, NID_LIB_GXM, NID_GXM_END_SCENE, end_scene_hook);
     g_hook[HOOK_DQ] = taiHookFunctionImport(&g_ref[HOOK_DQ], TAI_MAIN_MODULE, NID_LIB_GXM, NID_GXM_DQ_ADD_ENTRY, dq_add_entry_hook);
     g_hook[HOOK_VBLANK] = taiHookFunctionImport(&g_ref[HOOK_VBLANK], TAI_MAIN_MODULE, NID_LIB_DISPLAY, NID_WAIT_VBLANK_MULTI, wait_vblank_multi_hook);
-    diag("seg1 %08X hooks stage %08X fb %08X begin %08X end %08X dq %08X vblank %08X",
+    g_hook[HOOK_THREAD] = taiHookFunctionImport(&g_ref[HOOK_THREAD], TAI_MAIN_MODULE, NID_LIB_KERNEL, NID_CREATE_THREAD, create_thread_hook);
+    diag("seg1 %08X hooks stage %08X fb %08X begin %08X end %08X dq %08X vblank %08X thread %08X",
             (unsigned)g_seg1, g_hook[HOOK_STAGE], g_hook[HOOK_FB], g_hook[HOOK_BEGIN],
-            g_hook[HOOK_END], g_hook[HOOK_DQ], g_hook[HOOK_VBLANK]);
+            g_hook[HOOK_END], g_hook[HOOK_DQ], g_hook[HOOK_VBLANK], g_hook[HOOK_THREAD]);
+    tv_init(diag);
 
     update_text();
     g_thread = sceKernelCreateThread("divasplit_input", input_thread, 0x10000100, 0x4000, 0, 0, NULL);
@@ -619,6 +670,7 @@ int module_start(SceSize argc, const void *args) {
 }
 
 int module_stop(SceSize argc, const void *args) {
+    tv_shutdown();
     if (g_thread >= 0) {
         g_run = 0;
         sceKernelWaitThreadEnd(g_thread, NULL, NULL);

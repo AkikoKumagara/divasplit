@@ -17,6 +17,7 @@ In any other game or version the plugin stays idle.
 - **Split render presets.** Redraw the 3D world (PV) less often while notes and UI still redraw every frame. This trades PV smoothness for CPU and GPU time.
 - **Status bar** with fps and a per-frame timing breakdown: CPU work, waiting on the GPU, waiting for vblank, and 3D submit time.
 - **Recording.** One line per second goes to `ux0:data/divasplit/log.csv`.
+- **Thread view** (while recording). It shows how much of the time the main thread is running, ready but waiting for its core, or waiting on something, what it waits on, how busy each CPU core is with game threads, and each game thread's CPU time. It goes to `ux0:data/divasplit/threads.csv` and a second status bar line.
 - **Settings per game**, remembered across launches and changeable from the **Quick Menu** (hold PS).
 
 ## Install
@@ -64,7 +65,7 @@ Hold **L + R**, then press:
 | RIGHT | next 3D preset |
 | LEFT | AVS on / off |
 | UP | SYNC on / off |
-| DOWN | recording on / off (in X, also shows the game's own profiler) |
+| DOWN | recording + thread view on / off (in X, also shows the game's own profiler) |
 
 ## Presets
 
@@ -96,6 +97,22 @@ All numbers are milliseconds per frame, averaged over one second.
 
 - **gpu grows:** the GPU is the bottleneck.
 - **cpu grows:** the CPU is. In practice, X is mostly GPU-bound and f 2nd is CPU-bound in its 3D stage.
+
+While recording, a second line shows the thread view:
+
+```
+main run 78 rdy 1 wait 21  cores 80 35 - 4  wait <object name> 12
+```
+
+| Field | Meaning |
+|---|---|
+| run | % of the time the main thread is running |
+| rdy | % it could run, but another thread has its core |
+| wait | % it waits on something (vblank, GPU, another thread) |
+| cores | % of the time a game thread runs on core 0, 1, 2, 3. `-` is the core the sampler itself runs on, which it can't see. |
+| wait *name* | the object the main thread waits on most, and how often |
+
+A sampler thread checks the game about 1000 times a second, only while recording. It stays on one core. When it briefly pushes the main thread off that core, that sample is left out.
 
 ## Recommended setup
 
@@ -147,6 +164,7 @@ The script lists any site it couldn't find for certain instead of guessing. A po
 |---|---|
 | `ux0:data/divasplit/settings.txt` | settings per game |
 | `ux0:data/divasplit/log.csv` | recordings (each run starts with a header line) |
+| `ux0:data/divasplit/threads.csv` | thread view, one block per second: `M` main thread state, `C` per core, `T` per thread (CPU % of one core), `W` what the main thread waits on |
 | `ux0:data/divasplit/diag.txt` | load diagnostics for the current session |
 
 ## How it works
