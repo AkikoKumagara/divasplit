@@ -34,6 +34,14 @@
  *           whose end lets GXM recycle the ring buffer.
  *           The hooks go in at game start: patching these imports while the
  *           game calls them ~2000 times a frame crashed it.
+ *
+ *           Measured on f 2nd (A/B, same run): it works (93 of 175 blocks and
+ *           457 KB a frame reused, no glitches) but is ~0.8 ms a frame SLOWER.
+ *           The game's memcpys got 0.84 ms cheaper, the draw hook (compare +
+ *           one copy into GPU memory) cost 1.68 ms. On the Vita a copy into
+ *           cached memory (1.48 ms for 850 KB) is barely cheaper than into the
+ *           uncached ring, so checking that data is unchanged costs about as
+ *           much as writing it. Off for every game (probe_ret = {0}).
  */
 #include <arm_neon.h>
 #include <psp2/gxm.h>

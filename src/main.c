@@ -149,8 +149,8 @@ static const game_t GAMES[] = {
     // f: FM 0x816E7228, stage table 0x818F8B58 (seg1 0x81689000)
     {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}},
     // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
-    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0,
-     {0x4DE90A, 0x4DE8B8, 0x4DE8EA}},
+    // uniform reuse off (see opt.c); f 2nd's offsets: {0x4DE90A, 0x4DE8B8, 0x4DE8EA}
+    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}},
 };
 #define GAME_COUNT (int)(sizeof(GAMES) / sizeof(GAMES[0]))
 
