@@ -3,8 +3,8 @@
  * plugin (divasplit_qm.suprx), stored in ux0:data/divasplit/settings.txt:
  *
  *   active=F2ND
- *   X preset=0 sync=0 avs=1 bar=1 rec=0 opt=1
- *   F preset=0 sync=0 avs=0 bar=1 rec=0 opt=1
+ *   X preset=0 sync=0 avs=1 bar=1 rec=0 opt=0
+ *   F preset=0 sync=0 avs=0 bar=1 rec=0 opt=0
  *   F2ND preset=1 sync=1 avs=1 bar=0 rec=0 opt=1
  *
  * "active" is the game that started last. The game plugin rereads the file
@@ -60,7 +60,7 @@ static inline void settings_defaults(settings_t *s) {
         s->game[i].avs = 0;
         s->game[i].bar = 1;
         s->game[i].rec = 0;
-        s->game[i].opt = 1;
+        s->game[i].opt = 0;   // experiments only: none measured faster yet
     }
 }
 

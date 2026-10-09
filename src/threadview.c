@@ -107,6 +107,10 @@ static int thread_info(SceUID uid, SceKernelThreadInfo *ti);
  * display queue thread and core 2 the sound mixer (both pinned by the game),
  * so the main thread gets core 1 and every game thread that could run anywhere
  * moves to cores 0 and 2. Threads the game pinned itself stay where they are.
+ *
+ * Measured on f 2nd (A/B, 99 paired seconds): no help. Ready time only went
+ * from 2.7% to 2.5% of the frame, and the main thread losing the freedom to
+ * move cost more: cpu +0.6 ms, fps -1..-3. Kept as the OPT experiment.
  */
 #define CORE(n) (SCE_KERNEL_CPU_MASK_USER_0 << (n))
 static SceUID s_pin_ids[MAX_THREADS];
