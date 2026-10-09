@@ -121,6 +121,24 @@ The games only accept a controller sample newer than the last one they used. At 
 | f | `0x12E24` / `0x12E28` |
 | f 2nd | `0x2896F6` / `0x2896FE` |
 
+## Other releases (US / JP / ASIA)
+
+Only the EU releases (plus X US, which is the same build) are supported so far, because every release puts the code at different addresses. `tools/port.py` ports both the 60 fps patch and the plugin addresses to another release of X, f or f 2nd. It finds each EU patch site by the code around it.
+
+1. Dump the decrypted `eboot.bin` of **your own copy** (e.g. with FAGDec) and copy it to a PC.
+2. Run the script:
+   ```
+   pip install capstone
+   python3 tools/port.py eboot.bin.elf --title PCSE00434
+   ```
+3. Use what it prints:
+   - The `@FPS` block goes into that title's block in `ux0:data/VitaGrafix/patchlist.txt`. Keep its existing `@IB` lines and replace any old `@FPS` lines.
+   - The `GAMES[]` line goes into `src/main.c`.
+
+The script lists any site it couldn't find for certain instead of guessing. A ported patch still needs a test run in game before sharing. If it works, please open an issue or PR with the output. Never share the eboot itself.
+
+`tools/mkpatterns.py` rebuilds `tools/patterns.json` from the EU dumps (maintainer use).
+
 ## Files
 
 | Path | Contents |

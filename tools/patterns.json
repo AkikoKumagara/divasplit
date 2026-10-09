@@ -1,0 +1,810 @@
+{
+ "X": {
+  "eu_nid": "0x0A3FF027",
+  "lines": [
+   {
+    "comments": [
+     "# vsync wait: sceDisplayWaitVblankStartMulti(vblank)"
+    ],
+    "eu_offset": 270586,
+    "expr": "t1_mov(0, vblank)",
+    "bytes": "14f180000a90022037f3b9f9",
+    "mask": "ffffffffffffffff00f800d0",
+    "site_at": 6
+   },
+   {
+    "comments": [
+     "# GetVsyncInterval() -> vblank (fps = refresh / interval)"
+    ],
+    "eu_offset": 3370546,
+    "expr": "t2_vmov(0, float(vblank))",
+    "bytes": "12f1a0ea00bfb0ee000a7047",
+    "mask": "00f800d0ffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [
+     "# expected fps = refresh / vblank (was refresh * 0.5), + its 30.0 seed"
+    ],
+    "eu_offset": 273386,
+    "expr": "t2_vmov(1, 1.0 / vblank)",
+    "bytes": "2062f4f201f9f6ee000a0320",
+    "mask": "ffff00f800d0ffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 273672,
+    "expr": "t1_movt(3, 60.0 / vblank >> 16)",
+    "bytes": "2919c2e90201c4f2f0135362",
+    "mask": "ffffffffffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [
+     "# frame manager target fps = 60 / vblank"
+    ],
+    "eu_offset": 22224,
+    "expr": "t1_movt(1, 60.0 / vblank >> 16)",
+    "bytes": "6c732c73c4f2f011ac71",
+    "mask": "ffffffffffffffffffff",
+    "site_at": 4
+   },
+   {
+    "comments": [
+     "# hard-coded 30fps -> 60Hz conversions (x2.0 -> x vblank): timer, oscillator"
+    ],
+    "eu_offset": 4042040,
+    "expr": "t2_vmov(1, float(vblank))",
+    "bytes": "041c2af440fbf0ee000a94ed011a",
+    "mask": "ffff00f800d0ffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 2518728,
+    "expr": "t2_vmov(1, float(vblank))",
+    "bytes": "cded510a9ef578faf0ee000a48f68900",
+    "mask": "ffffffff00f800d0fffffffff0fb000f",
+    "site_at": 8
+   },
+   {
+    "comments": [
+     "# chara wind clock: advance vblank / 2 per frame instead of GetDelta()"
+    ],
+    "eu_offset": 3021094,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "86ed0f1ac6ed100a23f547fdd6ed110a",
+    "mask": "ffffffffffffffff00f800d0ffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [
+     "# hard-coded 1/30 s per-frame timesteps -> vblank / 60",
+     "# anim player fallback step, chara wind ramp-in, event sequence clock (x2)"
+    ],
+    "eu_offset": 2158972,
+    "expr": "mov32(0, vblank / 60.0, 0)",
+    "bytes": "d5ed1b8a90ed040a48f68900c3f60850",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 3021030,
+    "expr": "mov32(0, vblank / 60.0, 4)",
+    "bytes": "61eea00aa0f98f2c48f68900c7ef100fc3f60850",
+    "mask": "ffffffffffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 1130560,
+    "expr": "mov32(1, vblank / 60.0, 4)",
+    "bytes": "56e144f6303048f68901c0f20700c3f60851",
+    "mask": "00f8f0fb000fffffffffffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 1130712,
+    "expr": "mov32(0, vblank / 60.0, 0)",
+    "bytes": "c0f20700341848f68900c3f60850",
+    "mask": "f0fb000fffffffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [
+     "# chara default motion step when none is set: 2.0 -> vblank (vmov.f32 d18, #vblank)"
+    ],
+    "eu_offset": 3104670,
+    "expr": "uint32(0x2F10EFC0 | ((float(vblank) >> 23) & 7) | (((float(vblank) >> 19) & 15) << 16))",
+    "bytes": "6ff34101c167c4ef1026f9ff2036",
+    "mask": "ffffffffffffffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [
+     "# input: at 60 fps a frame sometimes gets no new controller sample; the game then",
+     "# read every button as released (broken holds, double presses). Always use the newest sample."
+    ],
+    "eu_offset": 2634578,
+    "expr": "bytes(4FF00008)",
+    "bytes": "6bdddc46dcf880885ff0000e",
+    "mask": "00ffffffffffffffffffffff",
+    "site_at": 4
+   },
+   {
+    "comments": [],
+    "eu_offset": 2634586,
+    "expr": "bytes(4FF00009)",
+    "bytes": "dcf880885ff0000edcf88498dce92067",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   }
+  ],
+  "plugin": {
+   "render_stage": {
+    "site": 2560872,
+    "bytes": "2de9f04f2ded028a8db04bf2f82b",
+    "mask": "fffffffffffffffffffff0fb000f",
+    "site_at": 0
+   },
+   "fm_ptr": {
+    "site": 271208,
+    "movw_at": 0,
+    "ldrb_at": 40,
+    "bytes": "3868249047f26c50c8f24f10",
+    "mask": "ffffffffffffffffffffffff",
+    "site_at": 4
+   },
+   "stages": {
+    "site": 2560896,
+    "movw_at": 0,
+    "bytes": "dbf800100c9140f20821c8f24f11",
+    "mask": "ffffffffffffffffffffffffffff",
+    "site_at": 6
+   },
+   "consts": {
+    "fm_is_ptr": 1,
+    "stages_is_ptr": 1,
+    "has_profiler": 1,
+    "stage_3d": 3,
+    "stage_fx": 2,
+    "stage_setup": 0,
+    "prof_flag": 12
+   }
+  }
+ },
+ "F": {
+  "eu_nid": "0x544807B3",
+  "lines": [
+   {
+    "comments": [
+     "# --- 60fps for Project DIVA f [EU 1.00], frame-rate aware (FPS=30 keeps stock timing) ---",
+     "# vsync wait: sceDisplayWaitVblankStartMulti(vblank)"
+    ],
+    "eu_offset": 79556,
+    "expr": "t1_mov(0, vblank)",
+    "bytes": "a2f38cfc0c9402200a94",
+    "mask": "00f800d0ffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [
+     "# expected fps = refresh / vblank (was refresh * 0.5) + its two 30.0 seeds"
+    ],
+    "eu_offset": 80200,
+    "expr": "t2_vmov(1, 1.0 / vblank)",
+    "bytes": "c4f8f8107bf3fcf8f6ee000a0320",
+    "mask": "ffffffff00f800d0ffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 87680,
+    "expr": "t1_movt(0, 60.0 / vblank >> 16)",
+    "bytes": "a918c6f80411c4f2f010c6f81c01",
+    "mask": "ffffffffffffffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 88538,
+    "expr": "t1_movt(1, 60.0 / vblank >> 16)",
+    "bytes": "0021c6f81801c4f2f011c6f81c11",
+    "mask": "ffffffffffffffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [
+     "# frame manager target / measured fps init (30.0)"
+    ],
+    "eu_offset": 86630,
+    "expr": "t1_movt(2, 60.0 / vblank >> 16)",
+    "bytes": "002287f80380c4f2f012c7f80480",
+    "mask": "ffffffffffffffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [
+     "# hard-coded 30fps -> 60Hz conversions (x2.0, x60*1/30) -> x vblank"
+    ],
+    "eu_offset": 5105744,
+    "expr": "t2_vmov(1, float(vblank))",
+    "bytes": "041c35f758f2f0ee000a94ed011a",
+    "mask": "ffff00f800d0ffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 553924,
+    "expr": "mov32(0, vblank / 60.0, 0)",
+    "bytes": "01ee100a20ee800a48f68900c3f60850",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [
+     "# chara default motion step when none is set: 2.0 -> vblank (vmov.f32 d2)"
+    ],
+    "eu_offset": 2836098,
+    "expr": "uint32(0x2F10EF80 | ((float(vblank) >> 23) & 7) | (((float(vblank) >> 19) & 15) << 16))",
+    "bytes": "6ff3c308caf8048784ef1026b9ff0136",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [
+     "# hard-coded 1/30 s per-frame timesteps -> vblank / 60",
+     "# anim player fallback, chara wind ramp, countdown timer, menu key repeat (x2)"
+    ],
+    "eu_offset": 9292,
+    "expr": "mov32(0, vblank / 60.0, 0)",
+    "bytes": "94ed180ad0ed030a48f68900c3f60850",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 2800616,
+    "expr": "mov32(3, vblank / 60.0, 0)",
+    "bytes": "201c22f1e1fa48f68903c3f60853",
+    "mask": "ffff00f800d0ffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 168596,
+    "expr": "mov32(0, vblank / 60.0, 0)",
+    "bytes": "b0ee001af7ee001a48f68900c3f60850",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 174564,
+    "expr": "mov32(1, vblank / 60.0, 4)",
+    "bytes": "002800f0b38048f6890140f6fc20c3f60851",
+    "mask": "ffff00f800d0ffffffffffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 174678,
+    "expr": "mov32(1, vblank / 60.0, 4)",
+    "bytes": "002861d048f6890140f60830c3f60851",
+    "mask": "ffff00ffffffffffffffffffffffffff",
+    "site_at": 4
+   },
+   {
+    "comments": [
+     "# counters advanced by GetDelta() in 30Hz frames -> vblank / 2 per frame",
+     "# chara wind clock, effect clocks/steps, long frame counter"
+    ],
+    "eu_offset": 2800720,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "8ef90f0880f90f6868f556f8d5ed110a",
+    "mask": "ffffffffffffffff00f800d0ffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 3543222,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "a069d0f84051b2f423fe40f6fc0014f5f451",
+    "mask": "ffffffffffff00f800d0f0fb000fffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 3543410,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "a069d0f84061b2f4c5fdd5ed060a",
+    "mask": "ffffffffffff00f800d0ffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 3544140,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "d0f84071d6b2b2f458fc40f6fc00",
+    "mask": "ffffffffffff00f800d0f0fb000f",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 3544572,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "a069d0f84051b2f480fb40f6fc002818",
+    "mask": "ffffffffffff00f800d0f0fb000fffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 3546842,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "90ed020a85ed120ab1f411ff40f6fc00",
+    "mask": "ffffffffffffffff00f800d0f0fb000f",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 2083476,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "bdeec00a10ee105a17f634f9d4ed3e0a",
+    "mask": "ffffffffffffffff00f800d0ffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [
+     "# UI transition frame counters"
+    ],
+    "eu_offset": 655238,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "40eea9aa8ded06ba8ded02aa8ded05aa0790301ccded03aa6af709fe73f7bbfed4ed200a84f8765030ee800a84ed200a281c1ae10229",
+    "mask": "ffffffffffffffffffffffffffffffffffffffffffffffff00f800d000f800d0ffffffffffffffffffffffffffffffffffff00f8ffff",
+    "site_at": 28
+   },
+   {
+    "comments": [],
+    "eu_offset": 655550,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "8ded1faa6af76dfd73f71ffed4ed200a",
+    "mask": "ffffffff00f800d000f800d0ffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 655688,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "cde91320301c6af728fd73f7dafdd4ed200a30eec00a",
+    "mask": "ffffffffffff00f800d000f800d0ffffffffffffffff",
+    "site_at": 10
+   },
+   {
+    "comments": [],
+    "eu_offset": 656170,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "40eea8aa8ded06ba8ded02aa8ded05aa0790301ccded03aa6af737fc73f7e9fcd4ed200a84f8765030ee800a84ed200a281c20e10229",
+    "mask": "ffffffffffffffffffffffffffffffffffffffffffffffff00f800d000f800d0ffffffffffffffffffffffffffffffffffff00f8ffff",
+    "site_at": 28
+   },
+   {
+    "comments": [],
+    "eu_offset": 656490,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "cded1daa6af797fb73f749fcd4ed200a",
+    "mask": "ffffffff00f800d000f800d0ffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 656632,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "cde91310301c6af750fb73f702fcd4ed200a30eec00a",
+    "mask": "ffffffffffff00f800d000f800d0ffffffffffffffff",
+    "site_at": 10
+   },
+   {
+    "comments": [],
+    "eu_offset": 657168,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "00ee219a41ee218a73f7f6fad4ed200a",
+    "mask": "ffffffffffffffff00f800d0ffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [
+     "# input: at 60 fps a frame sometimes gets no new controller sample; the game then",
+     "# read every button as released (broken holds, double presses). Always use the newest sample."
+    ],
+    "eu_offset": 77348,
+    "expr": "bytes(4FF00008)",
+    "bytes": "66dddc46dcf88088dcf88498",
+    "mask": "00ffffffffffffffffffffff",
+    "site_at": 4
+   },
+   {
+    "comments": [],
+    "eu_offset": 77352,
+    "expr": "bytes(4FF00009)",
+    "bytes": "dc46dcf88088dcf88498dce92067",
+    "mask": "ffffffffffffffffffffffffffff",
+    "site_at": 6
+   }
+  ],
+  "plugin": {
+   "render_stage": {
+    "site": 2671950,
+    "bytes": "f0b58db048f65834061c",
+    "mask": "ffffffffffffffffffff",
+    "site_at": 0
+   },
+   "fm": {
+    "site": 81152,
+    "movw_at": 0,
+    "bytes": "47f22820c8f26e1090ed030a017e",
+    "mask": "ffffffffffffffffffffffffffff",
+    "site_at": 0
+   },
+   "fm_req": {
+    "site": 81478,
+    "ldrb_at": 0,
+    "bytes": "14f1e800a0f98f0c94f8ec0014f10c01",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   "stages": {
+    "site": 2671954,
+    "movw_at": 0,
+    "movt_at": 6,
+    "bytes": "f0b58db048f65834061cc8f28f14",
+    "mask": "ffffffffffffffffffffffffffff",
+    "site_at": 4
+   },
+   "consts": {
+    "fm_is_ptr": 0,
+    "stages_is_ptr": 0,
+    "has_profiler": 0,
+    "stage_3d": 8,
+    "stage_fx": 7,
+    "stage_setup": 5,
+    "prof_flag": 24
+   }
+  }
+ },
+ "F2ND": {
+  "eu_nid": "0xDB737975",
+  "lines": [
+   {
+    "comments": [
+     "# --- 60fps for Project DIVA f 2nd [EU 1.00], frame-rate aware (FPS=30 keeps stock timing) ---",
+     "# vsync wait: sceDisplayWaitVblankStartMulti(vblank)"
+    ],
+    "eu_offset": 43412,
+    "expr": "t1_mov(0, vblank)",
+    "bytes": "09f16808cdf860800220d6f08bf3",
+    "mask": "ffffffffffffffffffff00f800d0",
+    "site_at": 8
+   },
+   {
+    "comments": [
+     "# expected fps = refresh / vblank (was refresh * 0.5) + its two 30.0 seeds"
+    ],
+    "eu_offset": 43762,
+    "expr": "t2_vmov(1, 1.0 / vblank)",
+    "bytes": "c4f8080141f014f7f6ee000a0320",
+    "mask": "ffffffff00f800d0ffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 50454,
+    "expr": "t1_movt(0, 60.0 / vblank >> 16)",
+    "bytes": "c6e93c010020c4f2f010c6f80c01",
+    "mask": "ffffffffffffffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 51038,
+    "expr": "t1_movt(1, 60.0 / vblank >> 16)",
+    "bytes": "0021c6f80801c4f2f011c6f80c11",
+    "mask": "ffffffffffffffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [
+     "# frame manager target / measured fps init (30.0)"
+    ],
+    "eu_offset": 49686,
+    "expr": "t1_movt(2, 60.0 / vblank >> 16)",
+    "bytes": "0022b870c4f2f0127860",
+    "mask": "ffffffffffffffffffff",
+    "site_at": 4
+   },
+   {
+    "comments": [
+     "# hard-coded 30fps -> 60Hz conversions (x2.0) -> x vblank: timer, oscillator"
+    ],
+    "eu_offset": 5825392,
+    "expr": "t2_vmov(1, float(vblank))",
+    "bytes": "041c7cf685f5f0ee000a94ed011a",
+    "mask": "ffff00f800d0ffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 2490080,
+    "expr": "t2_vmov(1, float(vblank))",
+    "bytes": "cded410aaaf5cdfff0ee000a48f68900",
+    "mask": "ffffffff00f800d0fffffffff0fb000f",
+    "site_at": 8
+   },
+   {
+    "comments": [
+     "# chara default motion step when none is set: 2.0 -> vblank (vmov.f32 d2)"
+    ],
+    "eu_offset": 3574112,
+    "expr": "uint32(0x2F10EF80 | ((float(vblank) >> 23) & 7) | (((float(vblank) >> 19) & 15) << 16))",
+    "bytes": "6ff3c306c9f8d06584ef1026b9ff0136",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [
+     "# hard-coded 1/30 s per-frame timesteps -> vblank / 60",
+     "# anim player fallback, chara wind ramp, countdown timer, fade timer, smoothing"
+    ],
+    "eu_offset": 2156226,
+    "expr": "mov32(0, vblank / 60.0, 0)",
+    "bytes": "94ed180ad0ed030a48f68900c3f60850",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 3546852,
+    "expr": "mov32(3, vblank / 60.0, 0)",
+    "bytes": "281c6ff1ffff48f68903c3f60853",
+    "mask": "ffff00f800d0ffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 147274,
+    "expr": "mov32(0, vblank / 60.0, 0)",
+    "bytes": "b0ee001af7ee001a48f68900c3f60850",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 362684,
+    "expr": "mov32(1, vblank / 60.0, 4)",
+    "bytes": "8e4200f0c58048f6890196ed060ac3f60851",
+    "mask": "ffff00f800d0ffffffffffffffffffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 364984,
+    "expr": "mov32(0, vblank / 60.0, 0)",
+    "bytes": "94ed170ad1ed000a48f68900c3f60850",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [
+     "# counters advanced by GetDelta() in 30Hz frames -> vblank / 2 per frame",
+     "# chara wind clock, effect clocks/steps, frame countdowns"
+    ],
+    "eu_offset": 3546956,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "80f90f0881f90f68a8f495ffd6ed110a",
+    "mask": "ffffffffffffffff00f800d0ffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 2540182,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "5ce0606bd0f890519ef5f0fd40f67810281840f6b421",
+    "mask": "00f8ffffffffffff00f800d0f0fb000ffffff0fb000f",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 2540452,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "d0f89071d6b29ef569fd40f67810",
+    "mask": "ffffffffffff00f800d0f0fb000f",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 2540924,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "53e0606bd0f890519ef57dfc40f67810281890ed008a",
+    "mask": "00f8ffffffffffff00f800d0f0fb000fffffffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 2543470,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "90ed020a85ed1a0a9df584ff40f67810",
+    "mask": "ffffffffffffffff00f800d0f0fb000f",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 4251330,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "11f001002cd0fcf7daf7daed850a",
+    "mask": "ffffffff00ff00f800d0ffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 4251426,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "11f0020023d0fcf7aaf7daed850a",
+    "mask": "ffffffff00ff00f800d0ffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [
+     "# UI transition frame counters"
+    ],
+    "eu_offset": 438650,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "8ded06ba8ded02aa8ded05aa0790301ccded03aaaff1b5fb9ff77efed4ed210a84f87a5030ee800a84ed210a002013e10020",
+    "mask": "ffffffffffffffffffffffffffffffffffffffff00f800d000f800d0ffffffffffffffffffffffffffffffffffff00f8ffff",
+    "site_at": 24
+   },
+   {
+    "comments": [],
+    "eu_offset": 438952,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "29ee21ba2591aff128fb281caff125fbb7ee080a4bf6520048ee289ac3f6ae7000ee900a09ee28ba40ee28aa42f6ff30cded1b9acded1e9ac3f6107000eea8aacded1daa8ded20ba2190281c8ded1caa8ded1faaaff11efb9ff7e7fdd4ed210a30ee800a84ed210a69e7002094ed210a00ee900ab4ee600af1ee10fa35d90021cde90e110dadcde91011281ccde91211cde916111891aff1e0fa281caff1ddfa40f63d204bf65201c3f6f7700e90c3f6ae71cde911015ff07f50cde90f104af2d73242f6ff30c3f63072c3f61070cde91320",
+    "mask": "ffffffffffff00f800d0ffff00f800d0fffffffff0fb000ffffffffff0fb000ffffffffffffffffffffffffff0fb000ffffffffffffffffff0fb000fffffffffffffffffffffffffffffffffffffffffffffffff00f800d000f800d0ffffffffffffffffffffffff00f8ffffffffffffffffffffffffffffffffffff00ffffffffffffffffffffffffffffffffffffffffffffffffff00f800d0ffff00f800d0f0fb000ff0fb000ff0fb000ffffff0fb000ffffffffffffffffffffffffff0fb000ff0fb000ff0fb000ff0fb000fffffffff",
+    "site_at": 88,
+    "nth": 0,
+    "count": 2
+   },
+   {
+    "comments": [],
+    "eu_offset": 439080,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "4af2d73242f6ff30c3f63072c3f61070cde91320281caff1defa9ff7a7fdd4ed210a30eec00a84ed210a29e70020c4f884000420",
+    "mask": "f0fb000ff0fb000ff0fb000ff0fb000fffffffffffff00f800d000f800d0ffffffffffffffffffffffff00f8ffffffffffffffff",
+    "site_at": 26
+   },
+   {
+    "comments": [],
+    "eu_offset": 439588,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "8ded06ba8ded02aa8ded05aa0790301ccded03aaaff1e0f99ff7a9fcd4ed210a84f87a5030ee800a84ed210a002017e10229",
+    "mask": "ffffffffffffffffffffffffffffffffffffffff00f800d000f800d0ffffffffffffffffffffffffffffffffffff00f8ffff",
+    "site_at": 24
+   },
+   {
+    "comments": [],
+    "eu_offset": 439900,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "29ee21ba2591aff14ef9281caff14bf9b7ee080a4bf6520048ee289ac3f6ae7000ee900a09ee28ba40ee28aa42f6ff30cded1b9acded1e9ac3f6107000eea8aacded1daa8ded20ba2190281c8ded1caa8ded1faaaff144f99ff70dfcd4ed210a30ee800a84ed210a64e7002094ed210a00ee900ab4ee600af1ee10fa35d90021cde90e110dadcde91011281ccde91211cde916111891aff106f9281caff103f940f63d204bf65201c3f6f7700e90c3f6ae71cde911015ff07f50cde90f104af2d73242f6ff30c3f63072c3f61070cde91320",
+    "mask": "ffffffffffff00f800d0ffff00f800d0fffffffff0fb000ffffffffff0fb000ffffffffffffffffffffffffff0fb000ffffffffffffffffff0fb000fffffffffffffffffffffffffffffffffffffffffffffffff00f800d000f800d0ffffffffffffffffffffffff00f8ffffffffffffffffffffffffffffffffffff00ffffffffffffffffffffffffffffffffffffffffffffffffff00f800d0ffff00f800d0f0fb000ff0fb000ff0fb000ffffff0fb000ffffffffffffffffffffffffff0fb000ff0fb000ff0fb000ff0fb000fffffffff",
+    "site_at": 88,
+    "nth": 1,
+    "count": 2
+   },
+   {
+    "comments": [],
+    "eu_offset": 440028,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "4af2d73242f6ff30c3f63072c3f61070cde91320281caff104f99ff7cdfbd4ed210a30eec00a84ed210a24e70020c4f884000320",
+    "mask": "f0fb000ff0fb000ff0fb000ff0fb000fffffffffffff00f800d000f800d0ffffffffffffffffffffffff00f8ffffffffffffffff",
+    "site_at": 26
+   },
+   {
+    "comments": [],
+    "eu_offset": 440540,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "8ded05aa0790301ccded03aaaff104f89ff7cdfad4ed210a84f87a5030ee800a84ed210a281c",
+    "mask": "ffffffffffffffffffffffff00f800d000f800d0ffffffffffffffffffffffffffffffffffff",
+    "site_at": 16
+   },
+   {
+    "comments": [],
+    "eu_offset": 440860,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "cded1daaaef164ff9ff72dfad4ed210a",
+    "mask": "ffffffff00f800d000f800d0ffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 441002,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "301caef11dff9ff7e6f9d4ed210a",
+    "mask": "ffff00f800d000f800d0ffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [],
+    "eu_offset": 441588,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "41ee819a00ee819a9ff7c1f8d4ed210a",
+    "mask": "ffffffffffffffff00f800d0ffffffff",
+    "site_at": 8
+   },
+   {
+    "comments": [],
+    "eu_offset": 449552,
+    "expr": "t2_vmov(0, vblank / 2.0)",
+    "bytes": "301cacf16afe9df733f9d4ed230a",
+    "mask": "ffff00f800d000f800d0ffffffff",
+    "site_at": 6
+   },
+   {
+    "comments": [
+     "# input: at 60 fps a frame sometimes gets no new controller sample; the game then",
+     "# read every button as released (broken holds, double presses). Always use the newest sample."
+    ],
+    "eu_offset": 2660086,
+    "expr": "bytes(4FF00008)",
+    "bytes": "6bdddc46dcf880885ff0000e",
+    "mask": "00ffffffffffffffffffffff",
+    "site_at": 4
+   },
+   {
+    "comments": [],
+    "eu_offset": 2660094,
+    "expr": "bytes(4FF00009)",
+    "bytes": "dcf880885ff0000edcf88498dce92067",
+    "mask": "ffffffffffffffffffffffffffffffff",
+    "site_at": 8
+   }
+  ],
+  "plugin": {
+   "render_stage": {
+    "site": 2513184,
+    "bytes": "f0b58bb041f64c77c8f2661739680a91061c",
+    "mask": "fffffffffffffffff0fb000fffffffffffff",
+    "site_at": 0
+   },
+   "fm": {
+    "site": 44666,
+    "movw_at": 0,
+    "bytes": "47f61830c8f2781090ed030a017e",
+    "mask": "ffffffffffffffffffffffffffff",
+    "site_at": 0
+   },
+   "fm_req": {
+    "site": 44892,
+    "ldrb_at": 0,
+    "bytes": "b3f0bdf394ed360a94f8dc00207684ed030a",
+    "mask": "00f800d0ffffffffffffffffffffffffffff",
+    "site_at": 8
+   },
+   "stages": {
+    "site": 2513202,
+    "movw_at": 0,
+    "bytes": "0a91061c42f60000c8f2b610",
+    "mask": "ffffffffffffffffffffffff",
+    "site_at": 4
+   },
+   "consts": {
+    "fm_is_ptr": 0,
+    "stages_is_ptr": 0,
+    "has_profiler": 0,
+    "stage_3d": 3,
+    "stage_fx": 2,
+    "stage_setup": 0,
+    "prof_flag": 12
+   }
+  }
+ }
+}
