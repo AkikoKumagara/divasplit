@@ -10,6 +10,8 @@ Frame pacing and performance plugin for **Hatsune Miku: Project DIVA X, f and f 
 
 In any other game or version the plugin stays idle.
 
+> **Help wanted: which PVs drop below 60 fps for you?** Post them in [issue #1](https://github.com/xpuska513/divasplit/issues/1): the game, the PV and where in the song it drops. No logs needed. The heaviest PVs are what the next optimizations will target.
+
 ## What it does
 
 - **AVS (adaptive vsync).** The games wait for the next screen refresh after every frame. A frame that takes even slightly longer than 16.7 ms then waits for the refresh after that, so a small slowdown becomes a drop straight from 60 to 30 fps. AVS skips that wait only when the frame is already late. A 17 ms frame stays 17 ms (about 58 fps instead of 30). It never goes above 60 fps, and frames are still flipped on vblank, so there is no tearing.
