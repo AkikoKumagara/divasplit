@@ -75,24 +75,8 @@ static uint32_t s_prev_used;
 
 // diagnostics (cumulative, for diag.txt)
 static volatile uint32_t d_commits, d_reused, d_reserve_fail, d_discards, d_max_used;
-static volatile uint32_t d_copy_bad, d_reuse_bad, d_overflow;
-static volatile uint32_t d_game_copies, d_game_bad;   // control: the game's own copies, read back
+static volatile uint32_t d_overflow;
 static volatile int d_reserve_err;
-// the first commits in detail: gpu, staging, size, first words of staging, of gpu before and after
-#define D_FIRST 4
-static uint32_t d_first[D_FIRST][8];
-static volatile uint32_t d_nfirst;
-
-static void copy_words(void *dst, const void *src, uint32_t n) {
-    volatile uint32_t *d = dst;
-    const uint32_t *s = src;
-    for (uint32_t i = 0; i < n / 4; i++)
-        d[i] = s[i];
-    volatile uint8_t *db = dst;
-    const uint8_t *sb = src;
-    for (uint32_t i = n & ~3u; i < n; i++)
-        db[i] = sb[i];
-}
 
 static int same_bytes(const uint8_t *a, const uint8_t *b, uint32_t n) {
     const uint32_t *x = (const uint32_t *)a, *y = (const uint32_t *)b;
@@ -134,13 +118,6 @@ static void *memcpy_hook(void *dst, const void *src, unsigned int n) {
                 s_used = end;
         }
     }
-    if (!s_staging && (uint32_t)__builtin_return_address(0) == s_ret[0] && d_game_copies < 100000) {
-        void *r = TAI_CONTINUE(void *, s_uref[UH_MEMCPY], dst, src, n);
-        d_game_copies++;
-        if (!same_bytes(dst, src, n))
-            d_game_bad++;
-        return r;
-    }
     return TAI_CONTINUE(void *, s_uref[UH_MEMCPY], dst, src, n);
 }
 
@@ -177,17 +154,15 @@ static int draw_hook(SceGxmContext *ctx, SceGxmPrimitiveType type, SceGxmIndexFo
         const void *indices, unsigned int count) {
     if (s_staging && ctx == s_staging_ctx) {
         s_staging = 0;
-        uint8_t *cur = s_stage[s_cur];
+        // not "cur" / "next": TAI_CONTINUE declares those and would shadow them
+        uint8_t *blk = s_stage[s_cur];
         if (s_count) {
             s_stats.groups++;
             s_stats.group_bytes += s_used;
         }
         if (s_used > d_max_used)
             d_max_used = s_used;
-        if (*s_on != 3 && s_prev_gpu && s_used == s_prev_used && same_bytes(cur, s_stage[s_cur ^ 1], s_used)) {
-            // check: the old GPU copy still holds these bytes
-            if (!same_bytes(s_prev_gpu, cur, s_used))
-                d_reuse_bad++;
+        if (*s_on != 3 && s_prev_gpu && s_used == s_prev_used && same_bytes(blk, s_stage[s_cur ^ 1], s_used)) {
             sceGxmSetVertexDefaultUniformBuffer(ctx, s_prev_gpu);
             d_reused++;
             if (s_count) {
@@ -198,23 +173,8 @@ static int draw_hook(SceGxmContext *ctx, SceGxmPrimitiveType type, SceGxmIndexFo
             void *gpu = NULL;
             int r = TAI_CONTINUE(int, s_uref[UH_RESERVE], ctx, &gpu);
             if (r >= 0 && gpu) {
-                uint32_t before0 = s_used >= 8 ? ((volatile uint32_t *)gpu)[0] : 0;
-                uint32_t before1 = s_used >= 8 ? ((volatile uint32_t *)gpu)[1] : 0;
                 if (s_used)
-                    copy_words(gpu, cur, s_used);   // not memcpy: rule out the import path
-                if (!same_bytes(gpu, cur, s_used))
-                    d_copy_bad++;
-                if (d_nfirst < D_FIRST && s_used >= 8) {
-                    uint32_t *f = d_first[d_nfirst++];
-                    f[0] = (uint32_t)gpu;
-                    f[1] = (uint32_t)cur;
-                    f[2] = s_used;
-                    f[3] = ((uint32_t *)cur)[0];
-                    f[4] = before0;
-                    f[5] = before1;
-                    f[6] = ((volatile uint32_t *)gpu)[0];
-                    f[7] = ((volatile uint32_t *)gpu)[1];
-                }
+                    TAI_CONTINUE(void *, s_uref[UH_MEMCPY], gpu, blk, s_used);
                 d_commits++;
                 s_prev_gpu = gpu;
                 s_prev_used = s_used;
@@ -246,19 +206,10 @@ int probe_install(uint32_t text_base, uint32_t memcpy_ret, uint32_t reserve_ret,
     return s_uhook[UH_RESERVE];
 }
 
-int probe_diag_first(char *buf, int size, int i) {
-    if (i >= (int)d_nfirst)
-        return 0;
-    const uint32_t *f = d_first[i];
-    return sceClibSnprintf(buf, size, "commit %d: gpu %08X stage %08X size %u stage[0] %08X gpu before %08X %08X after %08X %08X",
-            i, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
-}
-
 int probe_diag(char *buf, int size) {
     return sceClibSnprintf(buf, size,
-            "uniform: commits %u reused %u reserve-fail %u (%08X) discards %u max %u copy-bad %u reuse-bad %u overflow %u game-copies %u game-bad %u",
-            d_commits, d_reused, d_reserve_fail, (unsigned)d_reserve_err, d_discards, d_max_used,
-            d_copy_bad, d_reuse_bad, d_overflow, d_game_copies, d_game_bad);
+            "uniform: commits %u reused %u reserve-fail %u (%08X) discards %u max %u overflow %u",
+            d_commits, d_reused, d_reserve_fail, (unsigned)d_reserve_err, d_discards, d_max_used, d_overflow);
 }
 
 void probe_enable(int on) {

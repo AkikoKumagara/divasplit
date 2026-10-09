@@ -11,7 +11,7 @@ endif()
 project(divasplit C)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O2 -std=gnu99")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -Wshadow -O2 -std=gnu99")
 
 # Profiler kernel plugin (loaded at boot, idle until divasplit starts it)
 add_executable(divasplit_prof prof/src/main.c)
