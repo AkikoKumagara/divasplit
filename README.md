@@ -113,7 +113,7 @@ Until that PR is merged, install them yourself:
 
 They include an input fix that matters with or without this plugin.
 
-The games only accept a controller sample newer than the last one they used. At 60 fps there is about one sample per frame, so sometimes a frame gets none. The game then read every button as released, which broke hold notes and caused double presses. The fix makes the game always use the newest sample.
+The games only accept a controller sample newer than the last one they used. At 60 fps there is about one sample per frame, so sometimes a frame gets none. The game then reads every button as released, which breaks hold notes and causes double presses. The fix makes the game always use the newest sample.
 
 | Game | Patch lines |
 |---|---|
