@@ -76,6 +76,7 @@ static uint32_t s_prev_used;
 // diagnostics (cumulative, for diag.txt)
 static volatile uint32_t d_commits, d_reused, d_reserve_fail, d_discards, d_max_used;
 static volatile uint32_t d_copy_bad, d_reuse_bad, d_overflow;
+static volatile uint32_t d_game_copies, d_game_bad;   // control: the game's own copies, read back
 static volatile int d_reserve_err;
 // the first commits in detail: gpu, staging, size, first words of staging, of gpu before and after
 #define D_FIRST 4
@@ -132,6 +133,13 @@ static void *memcpy_hook(void *dst, const void *src, unsigned int n) {
             if (end > s_used)
                 s_used = end;
         }
+    }
+    if (!s_staging && (uint32_t)__builtin_return_address(0) == s_ret[0] && d_game_copies < 100000) {
+        void *r = TAI_CONTINUE(void *, s_uref[UH_MEMCPY], dst, src, n);
+        d_game_copies++;
+        if (!same_bytes(dst, src, n))
+            d_game_bad++;
+        return r;
     }
     return TAI_CONTINUE(void *, s_uref[UH_MEMCPY], dst, src, n);
 }
@@ -248,9 +256,9 @@ int probe_diag_first(char *buf, int size, int i) {
 
 int probe_diag(char *buf, int size) {
     return sceClibSnprintf(buf, size,
-            "uniform: commits %u reused %u reserve-fail %u (%08X) discards %u max %u copy-bad %u reuse-bad %u overflow %u",
+            "uniform: commits %u reused %u reserve-fail %u (%08X) discards %u max %u copy-bad %u reuse-bad %u overflow %u game-copies %u game-bad %u",
             d_commits, d_reused, d_reserve_fail, (unsigned)d_reserve_err, d_discards, d_max_used,
-            d_copy_bad, d_reuse_bad, d_overflow);
+            d_copy_bad, d_reuse_bad, d_overflow, d_game_copies, d_game_bad);
 }
 
 void probe_enable(int on) {
