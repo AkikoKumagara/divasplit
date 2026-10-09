@@ -136,16 +136,18 @@ typedef struct {
     unsigned char stage_3d, stage_fx, stage_setup;   // stage numbers the presets skip
     unsigned char prof_flag; // stage table byte: GPU profiler (sceGxmFinish around stages)
     uint32_t opt_matmul;     // seg0 offset of the 4x4 matrix multiply (0: off, see opt.c)
-    uint32_t probe_ret;      // seg0 offset after the uniform upload memcpy call (0: unknown)
+    uint32_t probe_ret[3];   // seg0 return offsets of the shader binding's memcpy, reserve,
+                             // SetUniformDataF calls (0: unknown)
 } game_t;
 
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
-    {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0, 0},
+    {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0, {0}},
     // f: FM 0x816E7228, stage table 0x818F8B58 (seg1 0x81689000)
-    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, 0},
+    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}},
     // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
-    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, 0x4DE90A},
+    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0,
+     {0x4DE90A, 0x4DE8B8, 0x4DE8EA}},
 };
 #define GAME_COUNT (int)(sizeof(GAMES) / sizeof(GAMES[0]))
 
@@ -326,10 +328,12 @@ static void log_line(uint64_t now) {
     }
     if (g_probe.calls && g_probe_frames && n < LOG_LINE - 64) {
         const probe_stats_t *p = &g_probe;
-        n += sceClibSnprintf(line + n, LOG_LINE - n, ",%u,%u,%u,%u,%u,%u,%u,%u,%08X,%08X",
+        n += sceClibSnprintf(line + n, LOG_LINE - n, ",%u,%u,%u,%u,%u,%u,%u,%u,%08X,%08X,%u,%u,%u,%u",
                 p->calls / g_probe_frames, p->bytes / g_probe_frames,
                 p->hist[0], p->hist[1], p->hist[2], p->hist[3], p->hist[4],
-                p->dst_aligned16, (unsigned)p->dst_min, (unsigned)p->dst_max);
+                p->dst_aligned16, (unsigned)p->dst_min, (unsigned)p->dst_max,
+                p->groups / g_probe_frames, p->group_bytes / g_probe_frames,
+                p->same / g_probe_frames, p->same_bytes / g_probe_frames);
     }
     line[n++] = '\n';
     g_log_len[head % LOG_SLOTS] = n;
@@ -345,7 +349,8 @@ static void log_flush(void) {
             static const char hdr[] = "# divasplit 1.9 recording\n"
                 "t,game,preset,sync,avs,opt,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap,"
                 "main_run,main_ready,main_wait,core0,core1,core2,core3,"
-                "up_calls,up_bytes,up_16,up_64,up_256,up_1k,up_more,up_al16,up_dst_min,up_dst_max\n";
+                "up_calls,up_bytes,up_16,up_64,up_256,up_1k,up_more,up_al16,up_dst_min,up_dst_max,"
+                "up_blocks,up_block_bytes,up_same,up_same_bytes\n";
             sceIoWrite(g_log_fd, hdr, sizeof(hdr) - 1);
         }
     }
@@ -458,6 +463,7 @@ static int render_stage_hook(int stage) {
 
 static int begin_scene_hook(void *ctx, unsigned int flags, const void *rt, const void *region,
         void *vsync, void *fsync, const void *color, const void *depth) {
+    probe_scene();
     uint64_t t0 = sceKernelGetProcessTimeWide();
     int ret = TAI_CONTINUE(int, g_ref[HOOK_BEGIN], ctx, flags, rt, region, vsync, fsync, color, depth);
     g_gpu_total += sceKernelGetProcessTimeWide() - t0;
@@ -597,7 +603,8 @@ static void prof_update(void) {
     static int probe = 0;
     if (g_rec && !probe && g_text_base) {
         probe = 1;
-        diag("uniform upload probe: %08X", probe_start(g_text_base, g_game->probe_ret));
+        diag("uniform upload probe: %08X", probe_start(g_text_base, g_game->probe_ret[0],
+                g_game->probe_ret[1], g_game->probe_ret[2]));
     }
     if (g_rec && g_prof_state == 0 && g_main_thid > 0) {
         prof_args_t a;
