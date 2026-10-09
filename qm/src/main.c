@@ -29,18 +29,20 @@
 #define TITLE_ID     ID("title")
 #define PRESET_ID    ID("preset")
 
-enum { ROW_AVS, ROW_SYNC, ROW_BAR, ROW_REC, ROW_COUNT };
+enum { ROW_AVS, ROW_SYNC, ROW_OPT, ROW_BAR, ROW_REC, ROW_COUNT };
 
-static const char *const ROW_PLANE[ROW_COUNT] = {ID("row_avs"), ID("row_sync"), ID("row_bar"), ID("row_rec")};
-static const char *const ROW_TEXT[ROW_COUNT] = {ID("txt_avs"), ID("txt_sync"), ID("txt_bar"), ID("txt_rec")};
-static const char *const ROW_BOX[ROW_COUNT] = {ID("cb_avs"), ID("cb_sync"), ID("cb_bar"), ID("cb_rec")};
+static const char *const ROW_PLANE[ROW_COUNT] = {ID("row_avs"), ID("row_sync"), ID("row_opt"), ID("row_bar"), ID("row_rec")};
+static const char *const ROW_TEXT[ROW_COUNT] = {ID("txt_avs"), ID("txt_sync"), ID("txt_opt"), ID("txt_bar"), ID("txt_rec")};
+static const char *const ROW_BOX[ROW_COUNT] = {ID("cb_avs"), ID("cb_sync"), ID("cb_opt"), ID("cb_bar"), ID("cb_rec")};
 static const char *const ROW_LABEL[ROW_COUNT] = {
-    "Adaptive vsync (AVS)", "Frame-drop catch-up (SYNC)", "Status bar", "Record to log.csv"};
+    "Adaptive vsync (AVS)", "Frame-drop catch-up (SYNC)", "Engine optimizations", "Status bar",
+    "Record to log.csv"};
 
 static int *row_field(game_settings_t *gs, int row) {
     switch (row) {
     case ROW_AVS:  return &gs->avs;
     case ROW_SYNC: return &gs->sync;
+    case ROW_OPT:  return &gs->opt;
     case ROW_BAR:  return &gs->bar;
     default:       return &gs->rec;
     }

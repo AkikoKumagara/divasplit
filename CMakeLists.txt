@@ -13,10 +13,31 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O2 -std=gnu99")
 
-add_executable(${PROJECT_NAME} src/main.c src/threadview.c)
+# Profiler kernel plugin (loaded at boot, idle until divasplit starts it)
+add_executable(divasplit_prof prof/src/main.c)
+target_link_options(divasplit_prof PRIVATE -nostdlib)
+target_link_libraries(divasplit_prof
+  taihenModuleUtils_stub
+  SceThreadmgrForDriver_stub
+  SceSysmemForDriver_stub
+  SceSysclibForDriver_stub
+  SceIofilemgrForDriver_stub
+  gcc
+)
+unset(VITA_ELF_CREATE_FLAGS)
+unset(VITA_MAKE_FSELF_FLAGS)
+vita_create_self(divasplit_prof.skprx divasplit_prof
+  UNSAFE
+  CONFIG ${CMAKE_SOURCE_DIR}/prof/divasplit_prof.yml
+)
+vita_create_stubs(prof_stubs divasplit_prof ${CMAKE_SOURCE_DIR}/prof/divasplit_prof.yml KERNEL)
+
+add_executable(${PROJECT_NAME} src/main.c src/threadview.c src/opt.c)
 target_link_options(${PROJECT_NAME} PRIVATE -nostdlib)
+add_dependencies(${PROJECT_NAME} prof_stubs)
 
 target_link_libraries(${PROJECT_NAME}
+  ${CMAKE_BINARY_DIR}/libdivasplit_prof_stub_weak.a
   taihen_stub
   SceLibKernel_stub
   SceKernelModulemgr_stub
@@ -73,7 +94,7 @@ unset(VITA_ELF_CREATE_FLAGS)
 unset(VITA_MAKE_FSELF_FLAGS)
 vita_create_self(eboot.bin divasplit_installer UNSAFE)
 vita_create_vpk(divasplit_installer.vpk DVSP00001 eboot.bin
-  VERSION 01.08
+  VERSION 01.09
   NAME "divasplit installer"
   FILE installer/sce_sys/icon0.png sce_sys/icon0.png
   FILE installer/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
@@ -81,6 +102,7 @@ vita_create_vpk(divasplit_installer.vpk DVSP00001 eboot.bin
   FILE installer/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
   FILE ${CMAKE_BINARY_DIR}/divasplit.suprx payload/divasplit.suprx
   FILE ${CMAKE_BINARY_DIR}/divasplit_qm.suprx payload/divasplit_qm.suprx
+  FILE ${CMAKE_BINARY_DIR}/divasplit_prof.skprx payload/divasplit_prof.skprx
   FILE vitagrafix/divax.txt payload/vitagrafix/divax.txt
   FILE vitagrafix/divaf.txt payload/vitagrafix/divaf.txt
   FILE vitagrafix/divaf2nd.txt payload/vitagrafix/divaf2nd.txt

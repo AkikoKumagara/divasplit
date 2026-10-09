@@ -21,6 +21,16 @@ int tai_install(const char *in, char titles[][TITLE_LEN + 1], int n, const char 
 // taiHEN config.txt: remove every divasplit line, and title sections that end up empty
 int tai_uninstall(const char *in, char titles[][TITLE_LEN + 1], int n, char **out);
 
+// taiHEN config.txt: line as the first entry of *KERNEL (the section is created
+// at the top when missing); nothing changes when it's already there
+int tai_kernel_add(const char *in, const char *line, char **out);
+
+// taiHEN config.txt: remove the non-comment lines of *KERNEL that contain needle
+int tai_kernel_remove(const char *in, const char *needle, char **out);
+
+// taiHEN config.txt: whether *KERNEL has a non-comment line containing needle
+int tai_kernel_has(const char *in, const char *needle);
+
 // VitaGrafix patchlist.txt: replace the headers of block (same title ID and NID)
 // with block. A block that also covers other games or versions keeps those headers.
 int vg_patch_replace(const char *in, const char *block, char **out);

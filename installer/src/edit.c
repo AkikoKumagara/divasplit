@@ -266,6 +266,73 @@ int tai_uninstall(const char *in, char titles[][TITLE_LEN + 1], int n, char **ou
     return finish(in, &L, &b, out);
 }
 
+static int is_kernel_section(const line_t *l) {
+    int sl;
+    const char *sec = tai_section(l, &sl);
+    return sec && eq_ci(sec, sl, "KERNEL");
+}
+
+int tai_kernel_has(const char *in, const char *needle) {
+    lines_t L;
+    if (split(in, &L) < 0)
+        return 0;
+    int kernel = 0, found = 0;
+    for (int i = 0; i < L.n && !found; i++) {
+        int sl;
+        if (tai_section(&L.v[i], &sl))
+            kernel = is_kernel_section(&L.v[i]);
+        else if (kernel && !is_comment(&L.v[i]) && contains_ci(L.v[i].s, L.v[i].len, needle))
+            found = 1;
+    }
+    free(L.v);
+    return found;
+}
+
+int tai_kernel_add(const char *in, const char *line, char **out) {
+    lines_t L;
+    sb_t b = {0};
+    *out = NULL;
+    if (tai_kernel_has(in, line))
+        return 0;
+    if (split(in, &L) < 0)
+        return -1;
+    int added = 0;
+    for (int i = 0; i < L.n; i++) {
+        sb_line(&b, L.v[i].s, L.v[i].len);
+        if (!added && is_kernel_section(&L.v[i])) {
+            sb_str(&b, line);
+            added = 1;
+        }
+    }
+    if (!added) {
+        sb_t c = {0};
+        sb_str(&c, "*KERNEL");
+        sb_str(&c, line);
+        if (b.s)
+            sb_add(&c, b.s, b.len);
+        free(b.s);
+        b = c;
+    }
+    return finish(in, &L, &b, out);
+}
+
+int tai_kernel_remove(const char *in, const char *needle, char **out) {
+    lines_t L;
+    sb_t b = {0};
+    if (split(in, &L) < 0)
+        return -1;
+    int kernel = 0;
+    for (int i = 0; i < L.n; i++) {
+        int sl;
+        if (tai_section(&L.v[i], &sl))
+            kernel = is_kernel_section(&L.v[i]);
+        else if (kernel && !is_comment(&L.v[i]) && contains_ci(L.v[i].s, L.v[i].len, needle))
+            continue;
+        sb_line(&b, L.v[i].s, L.v[i].len);
+    }
+    return finish(in, &L, &b, out);
+}
+
 /* VitaGrafix */
 
 static int vg_header(const line_t *l, char *title, unsigned long *nid) {

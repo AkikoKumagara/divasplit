@@ -4,6 +4,7 @@
  *   test_edit tai-uninstall config.txt block.txt...
  *   test_edit vg-patch patchlist.txt block.txt...
  *   test_edit vg-config config.txt block.txt...
+ *   test_edit kernel-add|kernel-remove config.txt block.txt
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,8 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "tai-install")) tai_install(text, titles, n, "ur0:tai/divasplit.suprx", &out);
     else if (!strcmp(argv[1], "tai-uninstall")) tai_uninstall(text, titles, n, &out);
     else if (!strcmp(argv[1], "vg-config")) vg_config_fps(text, titles, n, &out);
+    else if (!strcmp(argv[1], "kernel-add")) tai_kernel_add(text, "ur0:tai/divasplit_prof.skprx", &out);
+    else if (!strcmp(argv[1], "kernel-remove")) tai_kernel_remove(text, "divasplit_prof", &out);
     fputs(out ? out : text, stdout);
     fprintf(stderr, "titles:");
     for (int i = 0; i < n; i++) fprintf(stderr, " %s", titles[i]);

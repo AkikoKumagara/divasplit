@@ -59,6 +59,7 @@
  *   LEFT          toggle AVS (adaptive vsync)
  *   UP            toggle SYNC (frame-drop catch-up)
  *   DOWN          toggle recording (+ detail readout on X)
+ *   SELECT        toggle the engine optimizations
  *
  * Settings are remembered per game in ux0:data/divasplit/settings.txt (see
  * settings.h). The input thread rereads it twice a second, so the Quick Menu
@@ -72,6 +73,12 @@
  * running / ready / waiting split, what it waits on, per-core load and every
  * game thread's CPU time, into ux0:data/divasplit/threads.csv and a second
  * status bar line. sceKernelCreateThread is hooked to find the game threads.
+ *
+ * Engine optimizations (opt.c, L+R+SELECT or the Quick Menu switch them off):
+ * faster versions of hot game functions, found with the profiler.
+ *
+ * With the optional kernel plugin divasplit_prof.skprx installed, recording
+ * also runs the sampling profiler (prof.bin, see prof.h and tools/profview.py).
  *
  * Font: Terminus 8x14 Bold (SIL OFL 1.1), taken from Electry's PSVshell.
  */
@@ -89,6 +96,8 @@
 #include "font_ter_u14b.h"
 #include "settings.h"
 #include "threadview.h"
+#include "prof.h"
+#include "opt.h"
 
 #define STAGE_MAX 32
 
@@ -126,15 +135,16 @@ typedef struct {
     int has_profiler;        // FM keeps the X profiler slots
     unsigned char stage_3d, stage_fx, stage_setup;   // stage numbers the presets skip
     unsigned char prof_flag; // stage table byte: GPU profiler (sceGxmFinish around stages)
+    uint32_t opt_matmul;     // seg0 offset of the 4x4 matrix multiply (0: not known)
 } game_t;
 
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
-    {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C},
+    {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0},
     // f: FM 0x816E7228, stage table 0x818F8B58 (seg1 0x81689000)
-    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18},
+    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0x3CCB02},
     // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
-    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C},
+    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0x4D0FDE},
 };
 #define GAME_COUNT (int)(sizeof(GAMES) / sizeof(GAMES[0]))
 
@@ -160,6 +170,7 @@ static volatile int g_dirty = 0;   // settings changed: restart the perf window
 static volatile int g_rec = 0;
 static volatile int g_avs = 0;
 static volatile int g_bar = 1;
+static volatile int g_opt = 1;
 static volatile SceUID g_main_thid = -1;   // the thread that runs RenderStage
 static volatile unsigned int g_vb_main = 0, g_vb_other = 0;   // vblank waits per thread kind (diag)
 static settings_t g_settings;              // input thread only
@@ -174,11 +185,16 @@ static uint64_t g_rec_start = 0;
 static SceUID g_log_fd = -1;
 
 // diagnostics: hooks only set flags, the input thread writes diag.txt
-static volatile int g_cur_stage = -1;
+static volatile int g_cur_stage = -1;   // also read by the profiler
 static volatile int g_seen_stage = 0, g_seen_fb = 0;
 static SceDisplayFrameBuf g_fb_info;
 static uint64_t g_start_time = 0;
 static int g_diag_started = 0;
+
+// profiler (divasplit_prof.skprx), input thread only
+static uint32_t g_module_nid, g_text_base, g_text_size;
+static int g_prof_state = 0;   // 0 off, 1 running, -1 not available this session
+static volatile int g_prof_on = 0;
 
 // diag.txt only covers the current game session: the first line truncates it
 static void diag(const char *fmt, ...) {
@@ -259,8 +275,8 @@ static void update_text(void) {
         prof = " PROF";
     int n;
     if (!g_perf.valid) {
-        n = sceClibSnprintf(t, size, "%sSPLIT %s  SYNC %s  AVS %s", g_rec ? "REC " : "",
-                PRESETS[g_preset].name, g_sync ? "ON" : "OFF", g_avs ? "ON" : "OFF");
+        n = sceClibSnprintf(t, size, "%sSPLIT %s  SYNC %s  AVS %s%s", g_rec ? (g_prof_on ? "REC+PROF " : "REC ") : "",
+                PRESETS[g_preset].name, g_sync ? "ON" : "OFF", g_avs ? "ON" : "OFF", g_opt ? "  OPT" : "");
     } else if (g_rec && g_game->has_profiler) {
         // gpu is left out (swap covers it) and l is always 0.0: both still go to the log
         n = sceClibSnprintf(t, size, "REC %s%s%s %2dfps vs %d.%d",
@@ -271,9 +287,9 @@ static void update_text(void) {
                 n += sceClibSnprintf(t + n, size - n, "%s%d.%d", PROF_LABEL[k], MS(g_perf.prof10[k]));
     } else {
         n = sceClibSnprintf(t, size,
-                "%sSPLIT %s  SYNC %s  AVS %s  %2dfps cpu %d.%d gpu %d.%d vs %d.%d 3d %d.%d%s",
-                g_rec ? "REC " : "", PRESETS[g_preset].name, g_sync ? "ON" : "OFF",
-                g_avs ? "ON" : "OFF",
+                "%sSPLIT %s  SYNC %s  AVS %s%s  %2dfps cpu %d.%d gpu %d.%d vs %d.%d 3d %d.%d%s",
+                g_rec ? (g_prof_on ? "REC+PROF " : "REC ") : "", PRESETS[g_preset].name, g_sync ? "ON" : "OFF",
+                g_avs ? "ON" : "OFF", g_opt ? "  OPT" : "",
                 (g_perf.fps10 + 5) / 10, MS(g_perf.cpu10), MS(g_perf.gpu10),
                 MS(g_perf.vs10), MS(g_perf.s3d10), prof);
     }
@@ -289,8 +305,8 @@ static void log_line(uint64_t now) {
         g_rec_start = now;
     unsigned int t10 = (unsigned int)((now - g_rec_start) / 100000);
     char *line = g_log_ring[head % LOG_SLOTS];
-    int n = sceClibSnprintf(line, LOG_LINE, "%u.%u,%s,%s,%d,%d,%d,%d.%d,%d.%d,%d.%d,%d.%d,%d.%d",
-            t10 / 10, t10 % 10, game_tag(), PRESETS[g_preset].name, g_sync, g_avs, g_perf.late,
+    int n = sceClibSnprintf(line, LOG_LINE, "%u.%u,%s,%s,%d,%d,%d,%d,%d.%d,%d.%d,%d.%d,%d.%d,%d.%d",
+            t10 / 10, t10 % 10, game_tag(), PRESETS[g_preset].name, g_sync, g_avs, g_opt, g_perf.late,
             MS(g_perf.fps10), MS(g_perf.cpu10), MS(g_perf.gpu10), MS(g_perf.vs10), MS(g_perf.s3d10));
     for (int k = 0; k < PROF_COUNT && n < LOG_LINE - 16; k++)
         n += sceClibSnprintf(line + n, LOG_LINE - n, ",%d.%d", MS(g_perf.prof10[k]));
@@ -316,8 +332,8 @@ static void log_flush(void) {
         sceIoMkdir(LOG_DIR, 0777);
         g_log_fd = sceIoOpen(LOG_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0666);
         if (g_log_fd >= 0) {
-            static const char hdr[] = "# divasplit 1.8 recording\n"
-                "t,game,preset,sync,avs,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap,"
+            static const char hdr[] = "# divasplit 1.9 recording\n"
+                "t,game,preset,sync,avs,opt,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap,"
                 "main_run,main_ready,main_wait,core0,core1,core2,core3\n";
             sceIoWrite(g_log_fd, hdr, sizeof(hdr) - 1);
         }
@@ -531,6 +547,7 @@ static void settings_current(game_settings_t *gs) {
     gs->avs = g_avs;
     gs->bar = g_bar;
     gs->rec = g_rec;
+    gs->opt = g_opt;
 }
 
 static void settings_apply(const game_settings_t *gs) {
@@ -539,6 +556,7 @@ static void settings_apply(const game_settings_t *gs) {
     g_avs = gs->avs;
     g_bar = gs->bar;
     g_rec = gs->rec;
+    g_opt = gs->opt;
     g_dirty = 1;   // the render thread redraws the status line
 }
 
@@ -557,6 +575,35 @@ static void settings_poll(void) {
     settings_current(&cur);
     if (!game_settings_equal(&g_settings.game[g_game->settings_idx], &cur))
         settings_apply(&g_settings.game[g_game->settings_idx]);
+}
+
+// the profiler runs while recording, when its kernel plugin is installed
+static void prof_update(void) {
+    if (g_rec && g_prof_state == 0 && g_main_thid > 0) {
+        prof_args_t a;
+        sceClibMemset(&a, 0, sizeof(a));
+        a.magic = PROF_MAGIC;
+        a.version = PROF_VERSION;
+        a.size = sizeof(a);
+        a.main_thid = g_main_thid;
+        a.module_nid = g_module_nid;
+        a.text_base = g_text_base;
+        a.text_size = g_text_size;
+        a.frame_addr = (uint32_t)&g_frame;
+        a.stage_addr = (uint32_t)&g_cur_stage;
+        a.rate_hz = 500;
+        int r = divasplit_prof_start(&a);
+        diag("profiler start: %08X", r);
+        g_prof_state = r >= 0 ? 1 : -1;   // not installed or failed: don't retry this session
+        g_prof_on = r >= 0;
+        g_dirty = 1;
+    } else if (!g_rec && g_prof_state == 1) {
+        int n = divasplit_prof_stop();
+        diag("profiler stop: %d samples", n);
+        g_prof_state = 0;
+        g_prof_on = 0;
+        g_dirty = 1;
+    }
 }
 
 static int input_thread(SceSize args, void *argp) {
@@ -606,6 +653,10 @@ static int input_thread(SceSize args, void *argp) {
                 g_rec = !g_rec;
                 changed = 1;
             }
+            if (pressed & SCE_CTRL_SELECT) {
+                g_opt = !g_opt;
+                changed = 1;
+            }
             if (changed) {
                 g_dirty = 1;   // the render thread redraws the status line
                 settings_store();
@@ -616,6 +667,7 @@ static int input_thread(SceSize args, void *argp) {
         log_flush();
         tv_set(g_rec, g_main_thid);
         tv_flush();
+        prof_update();
         sceKernelDelayThread(50 * 1000);
     }
     return 0;
@@ -627,7 +679,7 @@ int module_start(SceSize argc, const void *args) {
     info.size = sizeof(info);
     g_start_time = sceKernelGetProcessTimeWide();
     if (taiGetModuleInfo(TAI_MAIN_MODULE, &info) < 0) {
-        diag("== divasplit 1.8: taiGetModuleInfo failed");
+        diag("== divasplit 1.9: taiGetModuleInfo failed");
         return SCE_KERNEL_START_SUCCESS;
     }
     for (int i = 0; i < GAME_COUNT; i++)
@@ -635,7 +687,7 @@ int module_start(SceSize argc, const void *args) {
             g_game = &GAMES[i];
     if (!g_game)
         return SCE_KERNEL_START_SUCCESS;   // not a build we know: do nothing
-    diag("== divasplit 1.8: %s nid %08X -> %s", info.name, (unsigned)info.module_nid, game_tag());
+    diag("== divasplit 1.9: %s nid %08X -> %s", info.name, (unsigned)info.module_nid, game_tag());
 
     // remembered settings; recording never carries over to a new session
     settings_load(&g_settings);
@@ -647,8 +699,12 @@ int module_start(SceSize argc, const void *args) {
     SceKernelModuleInfo minfo;
     sceClibMemset(&minfo, 0, sizeof(minfo));
     minfo.size = sizeof(minfo);
-    if (sceKernelGetModuleInfo(info.modid, &minfo) >= 0)
+    if (sceKernelGetModuleInfo(info.modid, &minfo) >= 0) {
         g_seg1 = (uintptr_t)minfo.segments[1].vaddr;
+        g_text_base = (uint32_t)minfo.segments[0].vaddr;
+        g_text_size = minfo.segments[0].memsz;
+    }
+    g_module_nid = info.module_nid;
 
     g_hook[HOOK_STAGE] = taiHookFunctionOffset(&g_ref[HOOK_STAGE], info.modid, 0, g_game->render_stage, 1, render_stage_hook);
     g_hook[HOOK_FB] = taiHookFunctionImport(&g_ref[HOOK_FB], TAI_MAIN_MODULE, NID_LIB_DISPLAY_USER, NID_SET_FRAME_BUF, set_frame_buf_hook);
@@ -660,6 +716,8 @@ int module_start(SceSize argc, const void *args) {
     diag("seg1 %08X hooks stage %08X fb %08X begin %08X end %08X dq %08X vblank %08X thread %08X",
             (unsigned)g_seg1, g_hook[HOOK_STAGE], g_hook[HOOK_FB], g_hook[HOOK_BEGIN],
             g_hook[HOOK_END], g_hook[HOOK_DQ], g_hook[HOOK_VBLANK], g_hook[HOOK_THREAD]);
+    int opt = opt_init(info.modid, g_game->opt_matmul, &g_opt);
+    diag("optimizations: matmul %08X", opt);
     tv_init(diag);
 
     update_text();
@@ -670,7 +728,10 @@ int module_start(SceSize argc, const void *args) {
 }
 
 int module_stop(SceSize argc, const void *args) {
+    if (g_prof_state == 1)
+        divasplit_prof_stop();
     tv_shutdown();
+    opt_shutdown();
     if (g_thread >= 0) {
         g_run = 0;
         sceKernelWaitThreadEnd(g_thread, NULL, NULL);

@@ -8,6 +8,8 @@
  *   - Quick Menu plugin, when QuickMenuReborn is installed
  *   - VitaGrafix patchlist.txt blocks and FPS=60 in its config.txt, when
  *     VitaGrafix is installed
+ *   - optional (SQUARE): the profiler kernel plugin, ur0:tai/divasplit_prof.skprx
+ *     under *KERNEL
  *
  * Files come from the VPK (app0:payload). Files in ux0:data/divasplit/install/
  * (same names) take priority and are deleted after a successful install, so a
@@ -33,7 +35,7 @@
 #include "font_ter_u14b.h"
 #include "edit.h"
 
-#define VERSION "1.8"
+#define VERSION "1.9"
 
 #define SCREEN_W 960
 #define SCREEN_H 544
@@ -47,6 +49,9 @@
 #define STAGE_DIR    "ux0:data/divasplit/install"
 #define PLUGIN_NAME  "divasplit.suprx"
 #define QM_NAME      "divasplit_qm.suprx"
+#define PROF_NAME    "divasplit_prof.skprx"
+#define PROF_DST     "ur0:tai/" PROF_NAME
+#define PROF_LINE    "ur0:tai/" PROF_NAME
 #define PLUGIN_DST   "ur0:tai/" PLUGIN_NAME
 #define PLUGIN_LINE  "ur0:tai/" PLUGIN_NAME
 #define TAI_UX       "ux0:tai/config.txt"
@@ -202,7 +207,7 @@ typedef struct {
     int staged;          // from ux0:data/divasplit/install
 } file_t;
 
-static file_t g_plugin, g_qm;
+static file_t g_plugin, g_qm, g_prof;
 static file_t g_blocks[MAX_BLOCKS];
 static int g_nblocks;
 static char g_titles[MAX_TITLES][TITLE_LEN + 1];
@@ -246,6 +251,7 @@ static void add_block_names(const char *dir, char names[][64], int *n) {
 static int load_payload(void) {
     int ok = load(&g_plugin, PLUGIN_NAME) == 0;
     load(&g_qm, QM_NAME);
+    load(&g_prof, PROF_NAME);
     char names[MAX_BLOCKS][64];
     int n = 0;
     add_block_names(STAGE_DIR "/vitagrafix", names, &n);
@@ -273,10 +279,10 @@ static int load_payload(void) {
 
 static void remove_staged(void) {
     char path[256];
-    file_t *all[2 + MAX_BLOCKS] = {&g_plugin, &g_qm};
+    file_t *all[3 + MAX_BLOCKS] = {&g_plugin, &g_qm, &g_prof};
     for (int i = 0; i < g_nblocks; i++)
-        all[2 + i] = &g_blocks[i];
-    for (int i = 0; i < 2 + g_nblocks; i++) {
+        all[3 + i] = &g_blocks[i];
+    for (int i = 0; i < 3 + g_nblocks; i++) {
         if (all[i]->staged) {
             snprintf(path, sizeof(path), STAGE_DIR "/%s", all[i]->name);
             sceIoRemove(path);
@@ -293,6 +299,8 @@ typedef struct {
     int tai_ok;
     const char *qmr_dir;      // NULL: QuickMenuReborn not installed
     int qm;
+    int prof;                 // 0 missing, 1 different, 2 same
+    int prof_line;            // listed under *KERNEL
     int qmr_rco;
     int vg_plugin;            // VitaGrafix listed in the taiHEN config
     int vg_patch_ok, vg_config_ok;
@@ -328,6 +336,7 @@ static void check(state_t *s) {
         s->tai_ok = tai_install(tai, g_titles, g_ntitles, PLUGIN_LINE, &out) == 0 && !out;
         free(out);
         s->vg_plugin = find_ci(tai, "vitagrafix.suprx") != NULL;
+        s->prof_line = tai_kernel_has(tai, PROF_NAME);
         free(tai);
     }
 
@@ -338,6 +347,8 @@ static void check(state_t *s) {
         s->qm = !exists(path) ? 0 : same_file(path, g_qm.data, g_qm.len) ? 2 : 1;
     }
     s->qmr_rco = exists(QMR_RCO);
+    if (g_prof.data)
+        s->prof = !exists(PROF_DST) ? 0 : same_file(PROF_DST, g_prof.data, g_prof.len) ? 2 : 1;
 
     char *pl = read_file(VG_PATCHLIST, NULL);
     char *cfg = read_file(VG_CONFIG, NULL);
@@ -391,9 +402,19 @@ static void show_status(const state_t *s) {
     } else {
         say(C_DIM, "  VitaGrafix    not found (%s): 60 fps patches skipped", VG_PATCHLIST);
     }
+    if (g_prof.data) {
+        if (s->prof_line)
+            say(s->prof == 2 ? C_OK : C_WARN, "  Profiler      %s  %s%s", PROF_DST, plugin_state[s->prof],
+                    g_prof.staged ? "  (new build in install folder)" : "");
+        else
+            say(C_DIM, "  Profiler      not installed (optional, for development)");
+    }
     say(C_TEXT, "");
     say(C_TEXT, "  X         install / update (reboots if needed)");
-    say(C_TEXT, "  TRIANGLE  uninstall the plugin (VitaGrafix patches stay)");
+    if (g_prof.data)
+        say(C_TEXT, "  SQUARE    %s the profiler (kernel plugin, samples the game while recording)",
+                s->prof_line ? "remove" : "install");
+    say(C_TEXT, "  TRIANGLE  uninstall everything (VitaGrafix patches stay)");
     say(C_TEXT, "  START     exit");
     say(C_TEXT, "");
 }
@@ -435,6 +456,11 @@ static int install(const state_t *s) {
         char path[256];
         snprintf(path, sizeof(path), "%s/" QM_NAME, s->qmr_dir);
         fail |= !step(write_file(path, g_qm.data, g_qm.len, 0) == 0, path);
+        reboot = 1;
+    }
+
+    if (s->prof_line && g_prof.data && s->prof != 2) {
+        fail |= !step(write_file(PROF_DST, g_prof.data, g_prof.len, 0) == 0, PROF_DST);
         reboot = 1;
     }
 
@@ -480,12 +506,50 @@ static int uninstall(const state_t *s) {
         free(out);
         free(tai);
     }
-    const char *files[] = {PLUGIN_DST, QMR_UX "/" QM_NAME, QMR_UR "/" QM_NAME};
-    for (int i = 0; i < 3; i++)
+    const char *files[] = {PLUGIN_DST, PROF_DST, QMR_UX "/" QM_NAME, QMR_UR "/" QM_NAME};
+    for (int i = 0; i < 4; i++)
         if (exists(files[i]))
             fail |= !step(sceIoRemove(files[i]) >= 0, files[i]);
     say(fail ? C_ERR : C_OK, fail ? "Something failed." : "Done. Settings and logs stay in ux0:data/divasplit.");
     return fail ? -1 : 1;
+}
+
+// SQUARE: add or remove the profiler
+static int prof_toggle(const state_t *s) {
+    int fail = 0;
+    char *tai = read_file(s->tai, NULL);
+    char *out = NULL;
+    if (!tai) {
+        step(0, "read taiHEN config");
+        return -1;
+    }
+    if (!s->prof_line) {
+        say(C_TITLE, "Installing the profiler...");
+        sceIoMkdir("ur0:tai", 0777);
+        fail |= !step(write_file(PROF_DST, g_prof.data, g_prof.len, 0) == 0, PROF_DST);
+        if (!fail && tai_kernel_add(tai, PROF_LINE, &out) == 0 && out)
+            fail |= !step(write_file(s->tai, out, strlen(out), 1) == 0, s->tai);
+    } else {
+        say(C_TITLE, "Removing the profiler...");
+        if (tai_kernel_remove(tai, PROF_NAME, &out) == 0 && out)
+            fail |= !step(write_file(s->tai, out, strlen(out), 1) == 0, s->tai);
+        if (!fail && exists(PROF_DST))
+            fail |= !step(sceIoRemove(PROF_DST) >= 0, PROF_DST);
+    }
+    free(out);
+    free(tai);
+    if (fail) {
+        say(C_ERR, "Something failed. Edited files have a .bak copy next to them.");
+        return -1;
+    }
+    if (g_prof.staged) {
+        char path[256];
+        snprintf(path, sizeof(path), STAGE_DIR "/%s", g_prof.name);
+        sceIoRemove(path);
+        g_prof.staged = 0;
+    }
+    say(C_OK, "Done.");
+    return 1;
 }
 
 /* input */
@@ -550,6 +614,16 @@ int main(void) {
         int r = -2;
         if (p & SCE_CTRL_CROSS) {
             r = install(&s);
+        } else if ((p & SCE_CTRL_SQUARE) && g_prof.data) {
+            say(C_WARN, "Press SQUARE again to %s the profiler, any other button cancels.",
+                    s.prof_line ? "remove" : "install");
+            unsigned int q;
+            while (!(q = pressed()))
+                wait_frames(1);
+            r = (q & SCE_CTRL_SQUARE) ? prof_toggle(&s) : -3;
+            // the profiler needs the plugin from the same build
+            if (r == 1 && !s.prof_line && install(&s) < 0)
+                r = -1;
         } else if (p & SCE_CTRL_TRIANGLE) {
             say(C_WARN, "Press TRIANGLE again to uninstall, any other button cancels.");
             unsigned int q;

@@ -1,0 +1,14 @@
+divasplit_prof:
+  attributes: 0
+  version:
+    major: 1
+    minor: 0
+  main:
+    start: module_start
+    stop: module_stop
+  libraries:
+    DivasplitProf:
+      syscall: true
+      functions:
+        - divasplit_prof_start
+        - divasplit_prof_stop

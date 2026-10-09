@@ -3,9 +3,9 @@
  * plugin (divasplit_qm.suprx), stored in ux0:data/divasplit/settings.txt:
  *
  *   active=F2ND
- *   X preset=0 sync=0 avs=1 bar=1 rec=0
- *   F preset=0 sync=0 avs=0 bar=1 rec=0
- *   F2ND preset=1 sync=1 avs=1 bar=0 rec=0
+ *   X preset=0 sync=0 avs=1 bar=1 rec=0 opt=1
+ *   F preset=0 sync=0 avs=0 bar=1 rec=0 opt=1
+ *   F2ND preset=1 sync=1 avs=1 bar=0 rec=0 opt=1
  *
  * "active" is the game that started last. The game plugin rereads the file
  * twice a second, so a change made in the Quick Menu applies right away.
@@ -44,7 +44,7 @@ static const preset_t PRESETS[] = {
 #define PRESET_COUNT (int)(sizeof(PRESETS) / sizeof(PRESETS[0]))
 
 typedef struct {
-    int preset, sync, avs, bar, rec;
+    int preset, sync, avs, bar, rec, opt;
 } game_settings_t;
 
 typedef struct {
@@ -60,6 +60,7 @@ static inline void settings_defaults(settings_t *s) {
         s->game[i].avs = 0;
         s->game[i].bar = 1;
         s->game[i].rec = 0;
+        s->game[i].opt = 1;
     }
 }
 
@@ -116,6 +117,7 @@ static inline void settings_load(settings_t *s) {
                 settings_get_int(sp, end, "avs", &gs->avs);
                 settings_get_int(sp, end, "bar", &gs->bar);
                 settings_get_int(sp, end, "rec", &gs->rec);
+                settings_get_int(sp, end, "opt", &gs->opt);
                 if (gs->preset < 0 || gs->preset >= PRESET_COUNT)
                     gs->preset = 0;
             }
@@ -131,8 +133,8 @@ static inline int settings_save(const settings_t *s) {
         n += sceClibSnprintf(buf + n, sizeof(buf) - n, "active=%s\n", SETTINGS_GAME_TAG[s->active]);
     for (int i = 0; i < SETTINGS_GAME_COUNT; i++) {
         const game_settings_t *gs = &s->game[i];
-        n += sceClibSnprintf(buf + n, sizeof(buf) - n, "%s preset=%d sync=%d avs=%d bar=%d rec=%d\n",
-                SETTINGS_GAME_TAG[i], gs->preset, gs->sync, gs->avs, gs->bar, gs->rec);
+        n += sceClibSnprintf(buf + n, sizeof(buf) - n, "%s preset=%d sync=%d avs=%d bar=%d rec=%d opt=%d\n",
+                SETTINGS_GAME_TAG[i], gs->preset, gs->sync, gs->avs, gs->bar, gs->rec, gs->opt);
     }
     sceIoMkdir(SETTINGS_DIR, 0777);
     SceUID fd = sceIoOpen(SETTINGS_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
@@ -145,7 +147,7 @@ static inline int settings_save(const settings_t *s) {
 
 static inline int game_settings_equal(const game_settings_t *a, const game_settings_t *b) {
     return a->preset == b->preset && a->sync == b->sync && a->avs == b->avs
-        && a->bar == b->bar && a->rec == b->rec;
+        && a->bar == b->bar && a->rec == b->rec && a->opt == b->opt;
 }
 
 #endif
