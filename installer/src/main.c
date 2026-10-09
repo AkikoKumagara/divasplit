@@ -13,7 +13,10 @@
  *
  * Files come from the VPK (app0:payload). Files in ux0:data/divasplit/install/
  * (same names) take priority and are deleted after a successful install, so a
- * test build can be dropped there over USB.
+ * test build can be dropped there over USB. Such a test build is remembered
+ * (ux0:data/divasplit/testbuild_<name>.txt, a checksum) and never replaced by
+ * the older copy bundled in the VPK; only a newer test build or a reinstall
+ * after uninstalling replaces it.
  *
  * Every edited file is backed up to <file>.bak first and replaced through a
  * temporary file.
@@ -190,6 +193,30 @@ static int write_file(const char *path, const void *data, size_t len, int backup
     return sceIoRename(tmp, path) < 0 ? -1 : 0;
 }
 
+static uint32_t checksum(const char *data, size_t len) {
+    uint32_t h = 0x811C9DC5;
+    for (size_t i = 0; i < len; i++)
+        h = (h ^ (unsigned char)data[i]) * 0x01000193;
+    return h;
+}
+
+static void testbuild_path(char *out, size_t size, const char *name) {
+    snprintf(out, size, "ux0:data/divasplit/testbuild_%s.txt", name);
+}
+
+// dst holds the test build installed from the install folder
+static int is_test_build(const char *dst, const char *name) {
+    char path[128];
+    testbuild_path(path, sizeof(path), name);
+    char *mark = read_file(path, NULL);
+    size_t len;
+    char *cur = read_file(dst, &len);
+    int yes = mark && cur && strtoul(mark, NULL, 16) == checksum(cur, len);
+    free(mark);
+    free(cur);
+    return yes;
+}
+
 static int same_file(const char *path, const char *data, size_t len) {
     size_t cur_len;
     char *cur = read_file(path, &cur_len);
@@ -295,7 +322,7 @@ static void remove_staged(void) {
 
 typedef struct {
     const char *tai;          // config.txt taiHEN uses
-    int plugin;               // 0 missing, 1 different, 2 same
+    int plugin;               // 0 missing, 1 different, 2 same, 3 test build (kept)
     int tai_ok;
     const char *qmr_dir;      // NULL: QuickMenuReborn not installed
     int qm;
@@ -325,10 +352,33 @@ static int patchlist_edit(const char *in, char **out) {
     return 0;
 }
 
+// remember a test build, or forget it when the bundled copy goes in
+static void note_install(const file_t *f) {
+    char path[128], text[16];
+    testbuild_path(path, sizeof(path), f->name);
+    if (f->staged) {
+        snprintf(text, sizeof(text), "%08X\n", (unsigned)checksum(f->data, f->len));
+        write_raw(path, text, strlen(text));
+    } else {
+        sceIoRemove(path);
+    }
+}
+
+// 0 missing, 1 different, 2 same, 3 a test build that the bundled copy must not replace
+static int file_state(const char *dst, const file_t *f) {
+    if (!exists(dst))
+        return 0;
+    if (same_file(dst, f->data, f->len))
+        return 2;
+    if (!f->staged && is_test_build(dst, f->name))
+        return 3;
+    return 1;
+}
+
 static void check(state_t *s) {
     memset(s, 0, sizeof(*s));
     s->tai = exists(TAI_UX) ? TAI_UX : TAI_UR;
-    s->plugin = !exists(PLUGIN_DST) ? 0 : same_file(PLUGIN_DST, g_plugin.data, g_plugin.len) ? 2 : 1;
+    s->plugin = file_state(PLUGIN_DST, &g_plugin);
 
     char *tai = read_file(s->tai, NULL);
     if (tai) {
@@ -344,11 +394,11 @@ static void check(state_t *s) {
     if (s->qmr_dir && g_qm.data) {
         char path[256];
         snprintf(path, sizeof(path), "%s/" QM_NAME, s->qmr_dir);
-        s->qm = !exists(path) ? 0 : same_file(path, g_qm.data, g_qm.len) ? 2 : 1;
+        s->qm = file_state(path, &g_qm);
     }
     s->qmr_rco = exists(QMR_RCO);
     if (g_prof.data)
-        s->prof = !exists(PROF_DST) ? 0 : same_file(PROF_DST, g_prof.data, g_prof.len) ? 2 : 1;
+        s->prof = file_state(PROF_DST, &g_prof);
 
     char *pl = read_file(VG_PATCHLIST, NULL);
     char *cfg = read_file(VG_CONFIG, NULL);
@@ -381,13 +431,14 @@ static void show_status(const state_t *s) {
     }
     say(C_TEXT, "Games:%s", titles);
     say(C_TEXT, "");
-    static const char *const plugin_state[] = {"not installed", "different version", "up to date"};
-    say(s->plugin == 2 ? C_OK : C_WARN, "  Plugin        %s  %s%s", PLUGIN_DST, plugin_state[s->plugin],
+    static const char *const plugin_state[] = {"not installed", "different version", "up to date",
+            "test build (kept)"};
+    say(s->plugin >= 2 ? C_OK : C_WARN, "  Plugin        %s  %s%s", PLUGIN_DST, plugin_state[s->plugin],
             g_plugin.staged ? "  (new build in install folder)" : "");
     say(s->tai_ok ? C_OK : C_WARN, "  taiHEN config %s  %s", s->tai,
             s->tai_ok ? "ok" : "needs the plugin lines");
     if (s->qmr_dir)
-        say(s->qm == 2 ? C_OK : C_WARN, "  Quick Menu    %s/%s  %s", s->qmr_dir, QM_NAME, plugin_state[s->qm]);
+        say(s->qm >= 2 ? C_OK : C_WARN, "  Quick Menu    %s/%s  %s", s->qmr_dir, QM_NAME, plugin_state[s->qm]);
     else
         say(C_DIM, "  Quick Menu    QuickMenuReborn not installed (optional, skipped)");
     if (s->qmr_dir && !s->qmr_rco)
@@ -404,7 +455,7 @@ static void show_status(const state_t *s) {
     }
     if (g_prof.data) {
         if (s->prof_line)
-            say(s->prof == 2 ? C_OK : C_WARN, "  Profiler      %s  %s%s", PROF_DST, plugin_state[s->prof],
+            say(s->prof >= 2 ? C_OK : C_WARN, "  Profiler      %s  %s%s", PROF_DST, plugin_state[s->prof],
                     g_prof.staged ? "  (new build in install folder)" : "");
         else
             say(C_DIM, "  Profiler      not installed (optional, for development)");
@@ -431,9 +482,10 @@ static int install(const state_t *s) {
     int reboot = 0, fail = 0;
     say(C_TITLE, "Installing...");
 
-    if (s->plugin != 2) {
+    if (s->plugin < 2) {
         sceIoMkdir("ur0:tai", 0777);
         fail |= !step(write_file(PLUGIN_DST, g_plugin.data, g_plugin.len, 0) == 0, PLUGIN_DST);
+        note_install(&g_plugin);
         reboot = 1;
     }
 
@@ -452,15 +504,17 @@ static int install(const state_t *s) {
         free(tai);
     }
 
-    if (s->qmr_dir && g_qm.data && s->qm != 2) {
+    if (s->qmr_dir && g_qm.data && s->qm < 2) {
         char path[256];
         snprintf(path, sizeof(path), "%s/" QM_NAME, s->qmr_dir);
         fail |= !step(write_file(path, g_qm.data, g_qm.len, 0) == 0, path);
+        note_install(&g_qm);
         reboot = 1;
     }
 
-    if (s->prof_line && g_prof.data && s->prof != 2) {
+    if (s->prof_line && g_prof.data && s->prof < 2) {
         fail |= !step(write_file(PROF_DST, g_prof.data, g_prof.len, 0) == 0, PROF_DST);
+        note_install(&g_prof);
         reboot = 1;
     }
 
@@ -510,6 +564,12 @@ static int uninstall(const state_t *s) {
     for (int i = 0; i < 4; i++)
         if (exists(files[i]))
             fail |= !step(sceIoRemove(files[i]) >= 0, files[i]);
+    const char *names[] = {PLUGIN_NAME, QM_NAME, PROF_NAME};
+    for (int i = 0; i < 3; i++) {
+        char path[128];
+        testbuild_path(path, sizeof(path), names[i]);
+        sceIoRemove(path);
+    }
     say(fail ? C_ERR : C_OK, fail ? "Something failed." : "Done. Settings and logs stay in ux0:data/divasplit.");
     return fail ? -1 : 1;
 }
@@ -527,6 +587,7 @@ static int prof_toggle(const state_t *s) {
         say(C_TITLE, "Installing the profiler...");
         sceIoMkdir("ur0:tai", 0777);
         fail |= !step(write_file(PROF_DST, g_prof.data, g_prof.len, 0) == 0, PROF_DST);
+        note_install(&g_prof);
         if (!fail && tai_kernel_add(tai, PROF_LINE, &out) == 0 && out)
             fail |= !step(write_file(s->tai, out, strlen(out), 1) == 0, s->tai);
     } else {
