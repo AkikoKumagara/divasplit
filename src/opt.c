@@ -42,6 +42,29 @@
  *           cached memory (1.48 ms for 850 KB) is barely cheaper than into the
  *           uncached ring, so checking that data is unchanged costs about as
  *           much as writing it. Off for every game (probe_ret = {0}).
+ *
+ * f 2nd main-thread cuts (docs/engine-notes.md "Main-thread cuts"; each one is
+ * a bit of the mask in ux0:data/divasplit/opt.txt, OPT switches the set):
+ *
+ *   centre  The 3D sort keys (seg0+0x245CDC) average a skinned object's centre
+ *           over its bones: per bone two 4x4 products and a transform,
+ *           Wi * B_i * (W * X) * c. That is linear in B_i, so summing the bone
+ *           matrices first and doing the products once gives the same average
+ *           (up to float rounding: keys move by a few ulps; the list order was
+ *           already nondeterministic, the task workers fill it in parallel).
+ *           One call in 64 (every call with check=1 in opt.txt) also runs the
+ *           game's version and records the largest difference (diag.txt).
+ *   dirty   seg0+0x4DEF04, once per draw flush, clears 224 dirty-flag bytes one
+ *           by one ("if (b) b = 0"). Patched to one memset of the same bytes:
+ *           the same memory afterwards.
+ *   lsort   std::list::sort of the draw lists (seg0+0x5ABB9C) allocates 27 list
+ *           heads from a locked heap and frees them every call. Replaced by a
+ *           bottom-up merge sort over static arrays: also stable, so the same
+ *           order.
+ *   nosort0 (off by default: changes draw order) skips sorting the opaque
+ *           list 0 front to back (stage table byte 0xA1). The GPU hides opaque
+ *           overdraw, but coplanar surfaces could flicker.
+ *   pin     the core pinning experiment (threadview.c), off by default.
  */
 #include <arm_neon.h>
 #include <psp2/gxm.h>
@@ -49,10 +72,12 @@
 #include <taihen.h>
 
 #include "opt.h"
+#include "cuts.h"
 
 static tai_hook_ref_t s_matmul_ref;
 static SceUID s_matmul_hook = -1;
 static volatile int *s_on;
+static volatile unsigned int s_mask = OPT_DEFAULT;
 
 /* uniform reuse */
 
@@ -259,10 +284,178 @@ static float *matmul_hook(float *o, const float *a, const float *b) {
     return matmul_neon(o, a, b);
 }
 
-int opt_init(SceUID modid, uint32_t matmul_off, volatile int *on) {
+/* f 2nd main-thread cuts */
+
+static const opt_cuts_t *s_cuts;
+static SceUID s_modid;
+static uintptr_t s_seg0, s_seg1;
+static mul44_fn s_mul;
+static inv44_fn s_inv;
+static xform_fn s_xform;
+
+enum { CH_CENTRE, CH_LSORT, CH_COUNT };
+static tai_hook_ref_t s_cref[CH_COUNT];
+static SceUID s_chook[CH_COUNT] = {-1, -1};
+
+// main thread only
+static SceUID s_dirty_inj = -1;   // the memset patch while it is in
+static int s_dirty_ok;            // the original bytes are there: the patch fits
+static int s_dirty_err;           // last failed injection
+static int s_sort0_cleared;       // we switched the list 0 sort off
+
+// diagnostics (cumulative)
+static volatile uint32_t d_centre_calls, d_centre_bones, d_sorts, d_sort_big;
+static volatile uint32_t d_check_n, d_check_abs, d_check_rel;   // largest differences, x1e6
+
+static inline int cut_on(unsigned int bit) {
+    return *s_on && (s_mask & bit);
+}
+
+// the original's arguments: obj+0x10 bone count (signed), *obj the sub mesh with
+// its centre c at +4 and the bone count it averages over at +0x20, bone matrices
+// (4x4, contiguous) at *(obj+0x14)
+static void centre_hook(const float *w, const float *x, const uint8_t *obj, float *out) {
+    const uint8_t *sub = *(const uint8_t *const *)obj;
+    uint32_t n = *(const uint32_t *)(sub + 0x20);
+    if (!cut_on(OPT_CENTRE) || *(const int32_t *)(obj + 0x10) <= 0 || n == 0) {
+        TAI_CONTINUE(void, s_cref[CH_CENTRE], w, x, obj, out);
+        return;
+    }
+    cuts_centre(w, x, obj, out, s_mul, s_inv, s_xform);
+    d_centre_calls++;
+    d_centre_bones += n;
+    // compare with the game's result: 1 call in 64, every call with check=1
+    if ((s_mask & OPT_CHECK) || (d_centre_calls & 63) == 0) {
+        float ref[3];
+        TAI_CONTINUE(void, s_cref[CH_CENTRE], w, x, obj, ref);
+        for (int k = 0; k < 3; k++) {
+            float d = out[k] - ref[k], a = ref[k];
+            if (d < 0)
+                d = -d;
+            if (a < 0)
+                a = -a;
+            float rel = d / (a > 1e-3f ? a : 1e-3f);
+            // NaN fails the compares: recorded as the largest difference
+            uint32_t abs6 = d < 4000.0f ? (uint32_t)(d * 1e6f) : 0xFFFFFFFFu;
+            uint32_t rel6 = rel < 4000.0f ? (uint32_t)(rel * 1e6f) : 0xFFFFFFFFu;
+            if (abs6 > d_check_abs)
+                d_check_abs = abs6;
+            if (rel6 > d_check_rel)
+                d_check_rel = rel6;
+        }
+        d_check_n++;
+    }
+}
+
+#define SORT_MAX 2048
+static lnode_t *s_sa[SORT_MAX], *s_sb[SORT_MAX];   // main thread only (the draw lists)
+
+static void list_sort_hook(dlist_t *l, less_fn less) {
+    uint32_t n = l->size;
+    if (!cut_on(OPT_LSORT) || n < 2 || n > SORT_MAX) {
+        if (n > SORT_MAX)
+            d_sort_big++;
+        TAI_CONTINUE(void, s_cref[CH_LSORT], l, less);
+        return;
+    }
+    cuts_list_sort(l, less, s_sa, s_sb);
+    d_sorts++;
+}
+
+// 0x4DF012..0x4DF031: for (i = 0; i < 0xE0; i++) if (t[0x1A2A + i]) t[0x1A2A + i] = 0;
+static const uint8_t DIRTY_ORIG[32] = {
+    0x5f, 0xf0, 0x00, 0x0e,   // movs.w lr, #0
+    0x41, 0xf6, 0x2a, 0x22,   // movw r2, #0x1a2a
+    0x71, 0x46,               // mov r1, lr
+    0x0b, 0x1c,               // adds r3, r1, #0
+    0xa2, 0x18,               // adds r2, r4, r2
+    0x10, 0x78,               // ldrb r0, [r2]
+    0x00, 0xb1,               // cbz r0, +4
+    0x13, 0x70,               // strb r3, [r2]
+    0x0e, 0xf1, 0x01, 0x0e,   // add.w lr, lr, #1
+    0x01, 0x32,               // adds r2, #1
+    0xbe, 0xf1, 0xe0, 0x0f,   // cmp.w lr, #0xe0
+    0xf6, 0xd3};              // blo loop
+// memset(t + 0x1A2A, 0, 0xE0), then on to the 2-byte loop at 0x4DF032 (which
+// stores r1 = 0); r4 = t is callee-saved, lr was pushed on entry
+static const uint8_t DIRTY_NEW[32] = {
+    0x41, 0xf6, 0x2a, 0x20,   // movw r0, #0x1a2a
+    0x20, 0x44,               // add r0, r4
+    0x00, 0x21,               // movs r1, #0
+    0xe0, 0x22,               // movs r2, #0xe0
+    0x80, 0xf1, 0xdc, 0xea,   // blx memset (import stub at seg0+0x65F5D8; PC-relative)
+    0x00, 0x21,               // movs r1, #0
+    0x06, 0xe0,               // b 0x4DF032
+    0x00, 0xbf, 0x00, 0xbf, 0x00, 0xbf, 0x00, 0xbf, 0x00, 0xbf, 0x00, 0xbf, 0x00, 0xbf};
+
+void opt_set_mask(unsigned int mask) {
+    s_mask = mask;
+}
+
+unsigned int opt_mask(void) {
+    return s_mask;
+}
+
+// the main thread at the start of a frame: none of the patched code runs now
+void opt_frame(void) {
+    if (!s_cuts)
+        return;
+    int want = cut_on(OPT_DIRTY) && s_dirty_ok;
+    if (want && s_dirty_inj < 0) {
+        s_dirty_inj = taiInjectData(s_modid, 0, s_cuts->dirty_loop, DIRTY_NEW, sizeof(DIRTY_NEW));
+        if (s_dirty_inj < 0) {
+            s_dirty_err = s_dirty_inj;
+            s_dirty_ok = 0;   // don't try every frame
+        }
+    } else if (!want && s_dirty_inj >= 0) {
+        taiInjectRelease(s_dirty_inj);
+        s_dirty_inj = -1;
+    }
+    if (s_cuts->sort0_flag) {
+        // the game sets it to 1 once, at start
+        volatile uint8_t *f = (volatile uint8_t *)(s_seg1 + s_cuts->sort0_flag);
+        if (cut_on(OPT_NOSORT0)) {
+            if (*f == 1) {
+                *f = 0;
+                s_sort0_cleared = 1;
+            }
+        } else if (s_sort0_cleared) {
+            if (*f == 0)
+                *f = 1;
+            s_sort0_cleared = 0;
+        }
+    }
+}
+
+int opt_diag(char *buf, int size) {
+    if (!s_cuts)
+        return sceClibSnprintf(buf, size, "cuts: none for this game");
+    return sceClibSnprintf(buf, size,
+            "cuts: mask %X hooks %08X %08X dirty %s (%08X) centre %u calls %u bones, sorts %u (%u too big)"
+            " check %u max abs %u rel %u (x1e-6)",
+            s_mask, s_chook[CH_CENTRE], s_chook[CH_LSORT],
+            s_dirty_inj >= 0 ? "in" : s_dirty_ok ? "out" : "unavailable", (unsigned)s_dirty_err,
+            d_centre_calls, d_centre_bones, d_sorts, d_sort_big, d_check_n, d_check_abs, d_check_rel);
+}
+
+int opt_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, uint32_t matmul_off,
+        const opt_cuts_t *cuts, volatile int *on) {
     s_on = on;
+    s_modid = modid;
+    s_seg0 = seg0;
+    s_seg1 = seg1;
     if (matmul_off)
         s_matmul_hook = taiHookFunctionOffset(&s_matmul_ref, modid, 0, matmul_off, 1, matmul_hook);
+    if (cuts && seg0) {
+        s_cuts = cuts;
+        s_mul = (mul44_fn)(seg0 + cuts->mul44 + 1);   // Thumb
+        s_inv = (inv44_fn)(seg0 + cuts->inv44 + 1);
+        s_xform = (xform_fn)(seg0 + cuts->xform + 1);
+        s_chook[CH_CENTRE] = taiHookFunctionOffset(&s_cref[CH_CENTRE], modid, 0, cuts->centre, 1, centre_hook);
+        s_chook[CH_LSORT] = taiHookFunctionOffset(&s_cref[CH_LSORT], modid, 0, cuts->list_sort, 1, list_sort_hook);
+        // the patch's blx is PC-relative from a 4-byte aligned address
+        s_dirty_ok = (seg0 & 3) == 0 && sceClibMemcmp((const void *)(seg0 + cuts->dirty_loop), DIRTY_ORIG, 32) == 0;
+    }
     return s_matmul_hook;
 }
 
@@ -270,6 +463,17 @@ void opt_shutdown(void) {
     if (s_matmul_hook >= 0)
         taiHookRelease(s_matmul_hook, s_matmul_ref);
     s_matmul_hook = -1;
+    if (s_dirty_inj >= 0)
+        taiInjectRelease(s_dirty_inj);
+    s_dirty_inj = -1;
+    if (s_cuts && s_sort0_cleared && *(volatile uint8_t *)(s_seg1 + s_cuts->sort0_flag) == 0)
+        *(volatile uint8_t *)(s_seg1 + s_cuts->sort0_flag) = 1;
+    s_sort0_cleared = 0;
+    for (int i = 0; i < CH_COUNT; i++) {
+        if (s_chook[i] >= 0)
+            taiHookRelease(s_chook[i], s_cref[i]);
+        s_chook[i] = -1;
+    }
     for (int i = UH_COUNT - 1; i >= 0; i--) {
         if (s_uhook[i] >= 0)
             taiHookRelease(s_uhook[i], s_uref[i]);

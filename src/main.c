@@ -76,8 +76,9 @@
  * game thread's CPU time, into ux0:data/divasplit/threads.csv and a second
  * status bar line. sceKernelCreateThread is hooked to find the game threads.
  *
- * Engine optimizations (opt.c, L+R+SELECT or the Quick Menu switch them off):
- * faster versions of hot game functions, found with the profiler.
+ * Engine optimizations (opt.c, L+R+SELECT or the Quick Menu switch them):
+ * faster versions of hot game functions, found with the profiler; f 2nd only
+ * so far. ux0:data/divasplit/opt.txt picks which ones OPT switches (opt.h).
  *
  * With the optional kernel plugin divasplit_prof.skprx installed, recording
  * also runs the sampling profiler (prof.bin, see prof.h and tools/profview.py).
@@ -141,16 +142,23 @@ typedef struct {
     uint32_t opt_matmul;     // seg0 offset of the 4x4 matrix multiply (0: off, see opt.c)
     uint32_t probe_ret[3];   // uniform reuse (opt.c): seg0 return offsets of the shader
                              // binding's memcpy, reserve, SetUniformDataF calls (0: unknown)
+    const opt_cuts_t *cuts;  // main-thread cuts (opt.c), NULL: none
 } game_t;
+
+// f 2nd EU 1.00 (docs/engine-notes.md "Main-thread cuts")
+static const opt_cuts_t F2ND_CUTS = {
+    .centre = 0x245CDC, .mul44 = 0x4D0FDE, .inv44 = 0x4D0BE0, .xform = 0x4D1DC6,
+    .dirty_loop = 0x4DF012, .list_sort = 0x5ABB9C, .sort0_flag = 0x4478A1,
+};
 
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
-    {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0, {0}},
+    {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0, {0}, NULL},
     // f: FM 0x816E7228, stage table 0x818F8B58 (seg1 0x81689000)
-    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}},
+    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}, NULL},
     // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
     // uniform reuse off (see opt.c); f 2nd's offsets: {0x4DE90A, 0x4DE8B8, 0x4DE8EA}
-    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}},
+    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS},
 };
 #define GAME_COUNT (int)(sizeof(GAMES) / sizeof(GAMES[0]))
 
@@ -206,7 +214,7 @@ static volatile int g_prof_on = 0;
 
 // diag.txt only covers the current game session: the first line truncates it
 static void diag(const char *fmt, ...) {
-    char buf[192];
+    char buf[320];
     va_list ap;
     va_start(ap, fmt);
     int n = sceClibVsnprintf(buf, sizeof(buf) - 1, fmt, ap);
@@ -454,6 +462,7 @@ static int render_stage_hook(int stage) {
         frame_start = tr0;
         g_main_thid = sceKernelGetThreadId();
         frame_boundary(t0);
+        opt_frame();
     }
 
     const preset_t *p = &PRESETS[g_preset];
@@ -635,6 +644,37 @@ static int file_exists(const char *path) {
     return sceIoGetstat(path, &st) >= 0;
 }
 
+// which cuts OPT switches (opt.h), e.g. "centre=1 dirty=1 lsort=1 nosort0=0 pin=0 check=0";
+// keys left out keep their default
+#define OPT_FILE LOG_DIR "/opt.txt"
+
+static void opt_file_load(void) {
+    static const struct {
+        const char *key;
+        unsigned int bit;
+    } KEYS[] = {{"centre", OPT_CENTRE}, {"dirty", OPT_DIRTY}, {"lsort", OPT_LSORT},
+            {"nosort0", OPT_NOSORT0}, {"pin", OPT_PIN}, {"check", OPT_CHECK}};
+    char buf[256];
+    unsigned int mask = OPT_DEFAULT;
+    SceUID fd = sceIoOpen(OPT_FILE, SCE_O_RDONLY, 0);
+    if (fd >= 0) {
+        int len = sceIoRead(fd, buf, sizeof(buf) - 1);
+        sceIoClose(fd);
+        for (int i = 0; i < len; i++)   // one key per line works too
+            if (buf[i] == '\n' || buf[i] == '\r' || buf[i] == '\t')
+                buf[i] = ' ';
+        for (unsigned int k = 0; len > 0 && k < sizeof(KEYS) / sizeof(KEYS[0]); k++) {
+            int v;
+            if (settings_get_int(buf, buf + len, KEYS[k].key, &v))
+                mask = v ? mask | KEYS[k].bit : mask & ~KEYS[k].bit;
+        }
+    }
+    if (mask != opt_mask()) {
+        opt_set_mask(mask);
+        diag("opt mask %X (opt.txt)", mask);
+    }
+}
+
 static void prof_update(void) {
     probe_enable(g_rec);
     if (g_rec && g_prof_state == 0 && g_main_thid > 0 && !file_exists(PROF_ON_FILE))
@@ -715,6 +755,11 @@ static int input_thread(SceSize args, void *argp) {
                 probe_diag(line, sizeof(line));
                 diag("%us opt %d (%d) %s", secs, g_opt, g_opt_on, line);
             }
+            if (g_game->cuts) {
+                char line[256];
+                opt_diag(line, sizeof(line));
+                diag("%us opt %d (%d) %s", secs, g_opt, g_opt_on, line);
+            }
         }
 
         SceCtrlData pad;
@@ -751,6 +796,8 @@ static int input_thread(SceSize args, void *argp) {
             }
         } else if (++tick % 10 == 0) {   // every 0.5 s
             settings_poll();
+            if (tick % 40 == 0)
+                opt_file_load();
         }
         log_flush();
         tv_set(g_rec, g_main_thid);
@@ -765,11 +812,12 @@ static int input_thread(SceSize args, void *argp) {
             trace_set(g_rec && trace_rec == 1);
         }
         {
-            int moved = tv_pin(g_opt_on == 1, g_main_thid);
+            int pin = g_opt_on == 1 && (opt_mask() & OPT_PIN);
+            int moved = tv_pin(pin, g_main_thid);
             static int logged = 0;
             if (moved && logged < 6) {
                 logged++;
-                diag("core pinning %s: %d threads", g_opt_on == 1 ? "on" : "off", moved);
+                diag("core pinning %s: %d threads", pin ? "on" : "off", moved);
             }
         }
         trace_flush();
@@ -822,8 +870,13 @@ int module_start(SceSize argc, const void *args) {
             (unsigned)g_seg1, g_hook[HOOK_STAGE], g_hook[HOOK_FB], g_hook[HOOK_BEGIN],
             g_hook[HOOK_END], g_hook[HOOK_DQ], g_hook[HOOK_VBLANK], g_hook[HOOK_THREAD]);
     g_opt_on = g_opt == 2 ? 1 : g_opt;
-    int opt = opt_init(info.modid, g_game->opt_matmul, &g_opt_on);
-    diag("optimizations: matmul %08X", opt);
+    opt_file_load();
+    int opt = opt_init(info.modid, g_text_base, g_seg1, g_game->opt_matmul, g_game->cuts, &g_opt_on);
+    {
+        char line[256];
+        opt_diag(line, sizeof(line));
+        diag("optimizations: matmul %08X, %s", opt, line);
+    }
     // dev tools, with the profiler kernel plugin installed (an unresolved import returns -1)
     if (divasplit_prof_stop() >= 0)
         diag("profiler present, tracer hooks: %d", trace_install());
