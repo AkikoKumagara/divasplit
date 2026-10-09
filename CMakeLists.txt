@@ -39,6 +39,7 @@ add_dependencies(${PROJECT_NAME} prof_stubs)
 target_link_libraries(${PROJECT_NAME}
   ${CMAKE_BINARY_DIR}/libdivasplit_prof_stub_weak.a
   taihen_stub
+  SceGxm_stub
   SceLibKernel_stub
   SceKernelModulemgr_stub
   SceKernelThreadMgr_stub

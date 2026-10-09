@@ -8,23 +8,22 @@
 int opt_init(SceUID modid, uint32_t matmul_off, volatile int *on);
 void opt_shutdown(void);
 
-// probe: memcpy calls from one call site (seg0 offset of the return address)
+// uniform reuse (see opt.c) and its counters
 typedef struct {
-    uint32_t calls, bytes;
-    uint32_t hist[5];          // sizes <=16, <=64, <=256, <=1024, more
-    uint32_t dst_min, dst_max;
-    uint32_t dst_aligned16;    // calls with a 16-byte aligned destination
-    // per draw: the whole vertex default uniform block (one reservation)
-    uint32_t groups, group_bytes;
-    uint32_t same, same_bytes; // identical to the previous draw's block, same scene
+    uint32_t calls, bytes;      // shader binding memcpys
+    uint32_t groups, group_bytes;   // blocks (one per draw) with opt on
+    uint32_t same, same_bytes;  // blocks that reused the previous GPU copy
+    uint32_t setdata;           // SetUniformDataF into a staged block
+    uint32_t overflow;          // writes past the staging buffer (dropped; must stay 0)
 } probe_stats_t;
 
-// hooks the shader binding's memcpy / reserve / SetUniformDataF; offsets are
-// seg0 offsets of the return addresses of those three calls. Call from
-// module_start: patching these hot imports while the game runs crashes it.
+// hooks the shader binding's memcpy / reserve / SetUniformDataF and sceGxmDraw;
+// offsets are seg0 offsets of the return addresses of the first three calls.
+// Call from module_start, after opt_init: patching these hot imports while the
+// game runs crashes it.
 int probe_install(uint32_t text_base, uint32_t memcpy_ret, uint32_t reserve_ret, uint32_t setdata_ret);
-void probe_enable(int on);                                // count only while recording
-void probe_scene(void);                                   // a scene started: no reuse across
+void probe_enable(int on);                                // keep counters (recording)
+void probe_scene(void);                                   // a scene started or ended
 void probe_take(probe_stats_t *out);                      // read and reset
 
 #endif
