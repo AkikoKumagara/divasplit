@@ -59,9 +59,10 @@
  *   LEFT          toggle AVS (adaptive vsync)
  *   UP            toggle SYNC (frame-drop catch-up)
  *   DOWN          toggle recording (+ detail readout on X)
- *   SELECT        engine optimizations: on -> off -> A/B -> on. A/B switches
- *                 them every second while recording; log.csv's opt column
- *                 says which way each second ran.
+ *   SELECT        engine optimizations: off -> STAGE -> on -> A/B -> off.
+ *                 A/B switches them every second while recording (log.csv's
+ *                 opt column says which way each second ran). STAGE is a
+ *                 test mode: uniform staging without reuse.
  *
  * Settings are remembered per game in ux0:data/divasplit/settings.txt (see
  * settings.h). The input thread rereads it twice a second, so the Quick Menu
@@ -175,8 +176,8 @@ static volatile int g_dirty = 0;   // settings changed: restart the perf window
 static volatile int g_rec = 0;
 static volatile int g_avs = 0;
 static volatile int g_bar = 1;
-static volatile int g_opt = 1;       // setting: 0 off, 1 on, 2 A/B
-static volatile int g_opt_on = 1;    // what the hooks use
+static volatile int g_opt = 1;       // setting: 0 off, 1 on, 2 A/B, 3 STAGE (test)
+static volatile int g_opt_on = 1;    // what the hooks use: 0 off, 1 on, 3 STAGE
 static int g_window_opt = 1;         // g_opt_on during the last log window
 static volatile SceUID g_main_thid = -1;   // the thread that runs RenderStage
 static volatile unsigned int g_vb_main = 0, g_vb_other = 0;   // vblank waits per thread kind (diag)
@@ -286,7 +287,7 @@ static void update_text(void) {
     if (!g_perf.valid) {
         n = sceClibSnprintf(t, size, "%sSPLIT %s  SYNC %s  AVS %s%s", g_rec ? (g_prof_on ? "REC+PROF " : "REC ") : "",
                 PRESETS[g_preset].name, g_sync ? "ON" : "OFF", g_avs ? "ON" : "OFF",
-                g_opt == 2 ? "  OPT A/B" : g_opt ? "  OPT" : "");
+                g_opt == 3 ? "  OPT STAGE" : g_opt == 2 ? "  OPT A/B" : g_opt ? "  OPT" : "");
     } else if (g_rec && g_game->has_profiler) {
         // gpu is left out (swap covers it) and l is always 0.0: both still go to the log
         n = sceClibSnprintf(t, size, "REC %s%s%s %2dfps vs %d.%d",
@@ -299,7 +300,7 @@ static void update_text(void) {
         n = sceClibSnprintf(t, size,
                 "%sSPLIT %s  SYNC %s  AVS %s%s  %2dfps cpu %d.%d gpu %d.%d vs %d.%d 3d %d.%d%s",
                 g_rec ? (g_prof_on ? "REC+PROF " : "REC ") : "", PRESETS[g_preset].name, g_sync ? "ON" : "OFF",
-                g_avs ? "ON" : "OFF", g_opt == 2 ? "  OPT A/B" : g_opt ? "  OPT" : "",
+                g_avs ? "ON" : "OFF", g_opt == 3 ? "  OPT STAGE" : g_opt == 2 ? "  OPT A/B" : g_opt ? "  OPT" : "",
                 (g_perf.fps10 + 5) / 10, MS(g_perf.cpu10), MS(g_perf.gpu10),
                 MS(g_perf.vs10), MS(g_perf.s3d10), prof);
     }
@@ -431,7 +432,7 @@ static void frame_boundary(uint64_t now) {
     g_probe_frames = g_win_frames;
     // the window that ended ran with g_opt_on; A/B flips it for the next one
     g_window_opt = g_opt_on;
-    g_opt_on = g_opt == 2 ? (g_rec ? !g_opt_on : 1) : g_opt != 0;
+    g_opt_on = g_opt == 2 ? (g_rec ? !g_opt_on : 1) : g_opt;
     g_perf.valid = 1;
     update_text();
     if (g_rec)
@@ -670,6 +671,11 @@ static int input_thread(SceSize args, void *argp) {
             next_beat += 5;
             diag("%us frames %u in-stage %d fps %d vblank waits main %u other %u", secs, g_frame,
                     g_cur_stage, g_perf.valid ? (g_perf.fps10 + 5) / 10 : -1, g_vb_main, g_vb_other);
+            if (g_game->probe_ret[0]) {
+                char line[160];
+                probe_diag(line, sizeof(line));
+                diag("%us opt %d (%d) %s", secs, g_opt, g_opt_on, line);
+            }
         }
 
         SceCtrlData pad;
@@ -697,7 +703,8 @@ static int input_thread(SceSize args, void *argp) {
                 changed = 1;
             }
             if (pressed & SCE_CTRL_SELECT) {
-                g_opt = (g_opt + 2) % 3;   // on -> off -> A/B -> on
+                static const int next[4] = {3, 2, 0, 1};   // off -> STAGE -> on -> A/B -> off
+                g_opt = next[g_opt & 3];
                 changed = 1;
             }
             if (changed) {
@@ -759,7 +766,7 @@ int module_start(SceSize argc, const void *args) {
     diag("seg1 %08X hooks stage %08X fb %08X begin %08X end %08X dq %08X vblank %08X thread %08X",
             (unsigned)g_seg1, g_hook[HOOK_STAGE], g_hook[HOOK_FB], g_hook[HOOK_BEGIN],
             g_hook[HOOK_END], g_hook[HOOK_DQ], g_hook[HOOK_VBLANK], g_hook[HOOK_THREAD]);
-    g_opt_on = g_opt != 0;
+    g_opt_on = g_opt == 2 ? 1 : g_opt;
     int opt = opt_init(info.modid, g_game->opt_matmul, &g_opt_on);
     diag("optimizations: matmul %08X", opt);
     if (g_game->probe_ret[0])

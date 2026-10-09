@@ -37,6 +37,7 @@
  */
 #include <arm_neon.h>
 #include <psp2/gxm.h>
+#include <psp2/kernel/clib.h>
 #include <taihen.h>
 
 #include "opt.h"
@@ -72,6 +73,11 @@ static uint32_t s_used;                    // bytes of the block written so far
 static void *s_prev_gpu;                   // GPU copy of s_stage[!s_cur], this scene
 static uint32_t s_prev_used;
 
+// diagnostics (cumulative, for diag.txt)
+static volatile uint32_t d_commits, d_reused, d_reserve_fail, d_discards, d_max_used;
+static volatile uint32_t d_copy_bad, d_reuse_bad, d_overflow;
+static volatile int d_reserve_err;
+
 static int same_bytes(const uint8_t *a, const uint8_t *b, uint32_t n) {
     const uint32_t *x = (const uint32_t *)a, *y = (const uint32_t *)b;
     for (uint32_t i = 0; i < n / 4; i++)
@@ -85,6 +91,8 @@ static int same_bytes(const uint8_t *a, const uint8_t *b, uint32_t n) {
 
 // no reuse across scenes, and a reservation we didn't stage replaces ours
 static void reuse_reset(void) {
+    if (s_staging)
+        d_discards++;
     s_staging = 0;
     s_prev_gpu = NULL;
 }
@@ -103,6 +111,7 @@ static void *memcpy_hook(void *dst, const void *src, unsigned int n) {
             uint32_t end = (uint32_t)dst - (uint32_t)s_stage[s_cur] + n;
             if (end > STAGE_BYTES) {   // can't happen with the blocks seen; never write past
                 s_stats.overflow++;
+                d_overflow++;
                 return dst;
             }
             if (end > s_used)
@@ -150,21 +159,33 @@ static int draw_hook(SceGxmContext *ctx, SceGxmPrimitiveType type, SceGxmIndexFo
             s_stats.groups++;
             s_stats.group_bytes += s_used;
         }
-        if (s_prev_gpu && s_used == s_prev_used && same_bytes(cur, s_stage[s_cur ^ 1], s_used)) {
+        if (s_used > d_max_used)
+            d_max_used = s_used;
+        if (*s_on != 3 && s_prev_gpu && s_used == s_prev_used && same_bytes(cur, s_stage[s_cur ^ 1], s_used)) {
+            // check: the old GPU copy still holds these bytes
+            if (!same_bytes(s_prev_gpu, cur, s_used))
+                d_reuse_bad++;
             sceGxmSetVertexDefaultUniformBuffer(ctx, s_prev_gpu);
+            d_reused++;
             if (s_count) {
                 s_stats.same++;
                 s_stats.same_bytes += s_used;
             }
         } else {
             void *gpu = NULL;
-            if (TAI_CONTINUE(int, s_uref[UH_RESERVE], ctx, &gpu) >= 0 && gpu) {
+            int r = TAI_CONTINUE(int, s_uref[UH_RESERVE], ctx, &gpu);
+            if (r >= 0 && gpu) {
                 if (s_used)
                     TAI_CONTINUE(void *, s_uref[UH_MEMCPY], gpu, cur, s_used);
+                if (!same_bytes(gpu, cur, s_used))
+                    d_copy_bad++;
+                d_commits++;
                 s_prev_gpu = gpu;
                 s_prev_used = s_used;
                 s_cur ^= 1;   // this block becomes the one to compare with
             } else {
+                d_reserve_fail++;
+                d_reserve_err = r;
                 s_prev_gpu = NULL;
             }
         }
@@ -187,6 +208,13 @@ int probe_install(uint32_t text_base, uint32_t memcpy_ret, uint32_t reserve_ret,
         if (s_uhook[i] < 0)
             return s_uhook[i];
     return s_uhook[UH_RESERVE];
+}
+
+int probe_diag(char *buf, int size) {
+    return sceClibSnprintf(buf, size,
+            "uniform: commits %u reused %u reserve-fail %u (%08X) discards %u max %u copy-bad %u reuse-bad %u overflow %u",
+            d_commits, d_reused, d_reserve_fail, (unsigned)d_reserve_err, d_discards, d_max_used,
+            d_copy_bad, d_reuse_bad, d_overflow);
 }
 
 void probe_enable(int on) {

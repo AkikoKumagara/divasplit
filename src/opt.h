@@ -25,5 +25,6 @@ int probe_install(uint32_t text_base, uint32_t memcpy_ret, uint32_t reserve_ret,
 void probe_enable(int on);                                // keep counters (recording)
 void probe_scene(void);                                   // a scene started or ended
 void probe_take(probe_stats_t *out);                      // read and reset
+int probe_diag(char *buf, int size);                      // cumulative self-checks, for diag.txt
 
 #endif
