@@ -105,7 +105,13 @@ All numbers are milliseconds per frame, averaged over one second.
 
 ## VitaGrafix 60 fps patch
 
-The 60 fps patches live in the VitaGrafix patchlist. They include an input fix that matters with or without this plugin.
+The 60 fps patches for the EU releases (and X US) are in [`vitagrafix/`](vitagrafix). They are also submitted upstream as [VitaGrafixPatchlist PR #162](https://github.com/Electry/VitaGrafixPatchlist/pull/162).
+
+Until that PR is merged, install them yourself:
+1. In `ux0:data/VitaGrafix/patchlist.txt`, replace the game's existing block with the one from `vitagrafix/`.
+2. Set `FPS=60` for that title in `ux0:data/VitaGrafix/config.txt`.
+
+They include an input fix that matters with or without this plugin.
 
 The games only accept a controller sample newer than the last one they used. At 60 fps there is about one sample per frame, so sometimes a frame gets none. The game then read every button as released, which broke hold notes and caused double presses. The fix makes the game always use the newest sample.
 
