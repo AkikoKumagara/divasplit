@@ -12,7 +12,8 @@
  *     under *KERNEL
  *   - the plugin's shaders, compiled with the system's shader compiler when
  *     ur0:data/libshacccg.suprx is there (extracted with ShaRKF00D), into
- *     ux0:data/divasplit/shaders/<name>.gxp; on errors <name>.log says why
+ *     ux0:data/divasplit/shaders/<name>.gxp; on errors <name>.log says why.
+ *     Optional: the plugin has the same shaders built in.
  *
  * Files come from the VPK (app0:payload). Files in ux0:data/divasplit/install/
  * (same names) take priority and are deleted after a successful install, so a
@@ -640,7 +641,7 @@ static int install(const state_t *s) {
 
     int sh = compile_shaders();
     if (sh < 0)
-        say(C_DIM, "  (no " SHACC_PATH ": shaders not compiled, sharpening stays off)");
+        say(C_DIM, "  (no " SHACC_PATH ": the plugin's built-in shaders are used)");
     else if (sh == 0)
         say(C_WARN, "  some shaders didn't compile: see " SHADER_DIR "/*.log");
 

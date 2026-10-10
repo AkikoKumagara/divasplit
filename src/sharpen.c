@@ -26,8 +26,9 @@
  * Menus (drawn 1:1) are left alone. AMD's RCAS on the full-screen blit was
  * tried first: 12 ms of GPU time a frame on stock clocks, too much.
  *
- * Our programs come from ux0:data/divasplit/shaders/, compiled on the Vita by
- * the installer (ur0:data/libshacccg.suprx). Without them nothing is hooked.
+ * Our programs: the .gxp files in ux0:data/divasplit/shaders/ when the installer compiled
+ * them there (ur0:data/libshacccg.suprx), else the copies built in
+ * (src/shaders_gxp.h, compiled the same way, tools/gxp2h.py).
  */
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/clib.h>
@@ -38,6 +39,7 @@
 #include "opt.h"
 #include "settings.h"
 #include "sharpen.h"
+#include "shaders_gxp.h"
 
 #define SH_DIR SETTINGS_DIR "/shaders"
 #define ALIGN(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
@@ -135,16 +137,27 @@ static void host_free(void *user, void *mem) {
     sceClibMspaceFree(s_host, mem);
 }
 
-// a compiled program from SH_DIR into s_b[B_PROGS] at *off
-static const SceGxmProgram *load_gxp(const char *name, unsigned int *off) {
+static int s_builtin;   // programs taken from the plugin (no files in SH_DIR)
+
+// a compiled program from SH_DIR, else the built-in copy, into s_b[B_PROGS] at *off
+static const SceGxmProgram *load_gxp(const char *name, const uint8_t *builtin, unsigned int len,
+        unsigned int *off) {
     char path[128];
     sceClibSnprintf(path, sizeof(path), SH_DIR "/%s", name);
-    SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0);
-    if (fd < 0)
-        return NULL;
     uint8_t *dst = (uint8_t *)s_b[B_PROGS].base + *off;
-    int n = sceIoRead(fd, dst, s_b[B_PROGS].size - *off);
-    sceIoClose(fd);
+    int n = -1;
+    SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0);
+    if (fd >= 0) {
+        n = sceIoRead(fd, dst, s_b[B_PROGS].size - *off);
+        sceIoClose(fd);
+        if (n > 0 && sceGxmProgramCheck((const SceGxmProgram *)dst) < 0)
+            n = -1;
+    }
+    if (n <= 0 && len <= s_b[B_PROGS].size - *off) {
+        sceClibMemcpy(dst, builtin, len);
+        n = (int)len;
+        s_builtin++;
+    }
     if (n <= 0 || sceGxmProgramCheck((const SceGxmProgram *)dst) < 0)
         return NULL;
     *off = ALIGN(*off + (unsigned int)n, 16);
@@ -157,10 +170,10 @@ static int load(void) {
     if ((r = block_alloc(&s_b[B_PROGS], "divasplit_sh_progs", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, 16 * 1024, 4096)) < 0)
         return r;
     unsigned int off = 0;
-    s_vprog = load_gxp("blit_v.gxp", &off);
-    s_fprog = load_gxp("sharpen_f.gxp", &off);
+    s_vprog = load_gxp("blit_v.gxp", GXP_BLIT_V, sizeof(GXP_BLIT_V), &off);
+    s_fprog = load_gxp("sharpen_f.gxp", GXP_SHARPEN_F, sizeof(GXP_SHARPEN_F), &off);
     if (!s_vprog || !s_fprog)
-        return -3;   // not compiled (no libshacccg.suprx when installing)
+        return -3;
     return 1;
 }
 
@@ -492,8 +505,9 @@ void sharpen_set_strength(int percent) {
 }
 
 int sharpen_diag(char *buf, int size) {
-    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X amount %d%% below %d; passes %u swaps %u wide %u bad %u"
+    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X%s amount %d%% below %d; passes %u swaps %u wide %u bad %u"
             " (step %d err %08X; image %ux%u fmt %08X type %08X)",
-            s_state, s_hook, (int)(s_amount * 50.0f + 0.5f), s_below, d_passes, d_swaps, d_one, d_bad,
+            s_state, s_hook, s_builtin ? " built-in" : "", (int)(s_amount * 50.0f + 0.5f), s_below, d_passes, d_swaps,
+            d_one, d_bad,
             s_why, (unsigned)s_why_err, s_src_w, s_src_h, s_src_fmt, s_src_type);
 }
