@@ -77,6 +77,7 @@ static uint8_t *s_g;
 static uintptr_t s_seg0, s_seg1;
 static uint32_t s_blit_ret, s_begin_ret;
 static float s_amount = 1.5f, s_over = 0.25f;
+static float s_last_amount;     // with the stretch boost, the last pass's (diag)
 static int s_below = 640;       // sharpen only images narrower than this (a mild stretch doesn't need it)
 static int s_req_below;         // opt.txt's (0: the game's default)
 static volatile int s_enabled = 1;   // the setting
@@ -410,10 +411,17 @@ static int pass(SceGxmContext *ctx) {
     if (vb && fb) {
         float rect[4] = {x0 / tw, y0 / th, x1 / tw, y1 / th};
         float hx = 0.5f / tw, hy = 0.5f / th;
-        // classic: the unsharp amount (0..2) and overshoot; adaptive: CAS's peak weight
-        // (0..-0.2), the same sharpening as classic on soft detail at the same setting
-        float k[4] = {1.0f / tw, 1.0f / th, p == P_ADAPTIVE ? -0.1f * s_amount : s_amount,
-                p == P_ADAPTIVE ? 0.0f : s_over};
+        // the more the image is stretched, the more it needs: the setting up to 1.5x
+        // (f's stock 640, a mild stretch), x1.2 at 2x (480), at most x1.3
+        float boost = 1.0f + 0.4f * (960.0f / w - 1.5f);
+        boost = boost < 1.0f ? 1.0f : boost > 1.3f ? 1.3f : boost;
+        float amount = s_amount * boost;
+        s_last_amount = amount;
+        // classic: the unsharp amount (0..2.6) and overshoot; adaptive: CAS's peak weight
+        // (0..-0.2, its strongest: 1 + 4w stays > 0), the same sharpening as classic on
+        // soft detail at the same setting
+        float peak = -0.1f * amount < -0.2f ? -0.2f : -0.1f * amount;
+        float k[4] = {1.0f / tw, 1.0f / th, p == P_ADAPTIVE ? peak : amount, p == P_ADAPTIVE ? 0.0f : s_over};
         float lim[4] = {rect[0] + hx, rect[1] + hy, rect[2] - hx, rect[3] - hy};
         sceGxmSetUniformDataF(vb, s_u_rect, 0, 4, rect);
         sceGxmSetUniformDataF(fb, s_u_k[p], 0, 4, k);
@@ -558,12 +566,12 @@ void sharpen_set_strength(int percent) {
 }
 
 int sharpen_diag(char *buf, int size) {
-    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X%s style %s (adaptive %s, last %s) amount %d%% below %d;"
+    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X%s style %s (adaptive %s, last %s) amount %d%% (last %d%%) below %d;"
             " passes %u swaps %u wide %u bad %u (step %d err %08X; image %ux%u fmt %08X type %08X)",
             s_state, s_hook, s_builtin ? " built-in" : "", s_style == P_ADAPTIVE ? "adaptive" : "classic",
             !s_fprog[P_ADAPTIVE] ? "missing" : s_state < 2 ? "loaded" : s_fp[P_ADAPTIVE] ? "ready" : "failed",
             s_used < 0 ? "-" : s_used == P_ADAPTIVE ? "adaptive" : "classic",
-            (int)(s_amount * 50.0f + 0.5f), s_below, d_passes, d_swaps,
+            (int)(s_amount * 50.0f + 0.5f), (int)(s_last_amount * 50.0f + 0.5f), s_below, d_passes, d_swaps,
             d_one, d_bad,
             s_why, (unsigned)s_why_err, s_src_w, s_src_h, s_src_fmt, s_src_type);
 }

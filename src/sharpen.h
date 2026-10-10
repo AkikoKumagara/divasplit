@@ -16,7 +16,7 @@ typedef struct {
     uint32_t d_mgr;      // seg1 offset of the pointer to the render manager
     uint32_t fbo11;      // seg0 offset of FBO 11's entry in the FBO table (+0x18/+0x1C offset; 0: at 0,0)
     uint32_t fbo11_size; // render manager + this: FBO 11's logical size (w, h), this frame's
-    int below;           // default: sharpen images narrower than this (f 2nd 640; f 960, its stock 640 too)
+    int below;           // default: sharpen images narrower than this (960: whenever stretched)
 } sharpen_game_t;
 
 // hooks the blit at game start, if the shaders are there

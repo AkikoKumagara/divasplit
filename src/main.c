@@ -236,7 +236,8 @@ static const opt_cuts_t F_CUTS = {
 // the final blit of the 3D image and the framebuffer scene's begin (sharpen.c); the GL
 // state and its bound texture units
 static const sharpen_game_t F2ND_SHARPEN = {.blit = 0x25E208, .blit_ret = 0x26124A, .begin_ret = 0x4E0802, .stage = 4,
-        .d_gl = 0x6032A8, .tex_units = 0x1217C4, .d_mgr = 0x447808, .fbo11 = 0x6B3164, .fbo11_size = 0x194C};
+        .d_gl = 0x6032A8, .tex_units = 0x1217C4, .d_mgr = 0x447808, .fbo11 = 0x6B3164, .fbo11_size = 0x194C,
+        .below = 960};
 
 // the render manager's per-frame setup, which writes the 3D size (drs.c)
 static const drs_game_t F2ND_DRS = {.stage0 = 0x25E32E, .scene_ret = 0x266588, .d_mgr = 0x447808,

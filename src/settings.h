@@ -66,7 +66,7 @@ static inline void settings_defaults(settings_t *s) {
         s->game[i].opt = sceClibStrncmp(SETTINGS_GAME_TAG[i], "F2ND", 5) == 0
                 || sceClibStrncmp(SETTINGS_GAME_TAG[i], "F", 2) == 0;
         s->game[i].drs = 0;     // lowers the resolution: asked for, not by default
-        s->game[i].sharp = 1;   // f 2nd: only below 640 wide (drs, or VitaGrafix IB); f: whenever stretched
+        s->game[i].sharp = 1;   // whenever the 3D image is stretched (stronger the lower its resolution)
         s->game[i].style = 0;   // adaptive
     }
 }
