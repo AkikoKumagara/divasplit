@@ -18,6 +18,7 @@ int drs_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const drs_game_t *g);
 int drs_scene_region(uint32_t ret_addr, const void *color, unsigned int *xmax, unsigned int *ymax);
 void drs_shutdown(void);
 void drs_set_range(int min_w, int max_w);          // widths; heights keep 960:544
+void drs_set_enabled(int on);                      // the setting (with OPT and opt.txt's drs)
 // once per frame (main thread): last frame's time, its GPU and vblank waits (us)
 void drs_frame(unsigned int frame_us, unsigned int gpu_us, unsigned int vs_us);
 int drs_width(void);                               // 3D width used this frame (0: not in a PV)

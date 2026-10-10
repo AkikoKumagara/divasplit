@@ -68,6 +68,7 @@ static uintptr_t s_seg0, s_seg1;
 static uint32_t s_blit_ret, s_begin_ret;
 static float s_amount = 1.5f, s_over = 0.25f;
 static int s_below = 640;       // sharpen only images narrower than this (a mild stretch doesn't need it)
+static volatile int s_enabled = 1;   // the setting
 static tai_hook_ref_t s_ref;
 static SceUID s_hook = -1;
 
@@ -384,7 +385,7 @@ static int pass(SceGxmContext *ctx) {
 }
 
 int sharpen_before_scene(void *ctx, uint32_t ret_addr, int stage) {
-    if (ret_addr != s_begin_ret || stage != 4 || s_state < 1 || !s_src || s_amount <= 0.0f
+    if (ret_addr != s_begin_ret || stage != 4 || s_state < 1 || !s_src || s_amount <= 0.0f || !s_enabled
             || !opt_cut_on(OPT_SHARPEN))
         return 0;
     if (s_state == 1) {   // first time: the GPU side, once
@@ -475,6 +476,10 @@ void sharpen_shutdown(void) {
         block_free(&s_b[i]);
     }
     s_state = 0;
+}
+
+void sharpen_set_enabled(int on) {
+    s_enabled = on;
 }
 
 void sharpen_set_below(int width) {

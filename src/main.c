@@ -210,6 +210,7 @@ static volatile int g_rec = 0;
 static volatile int g_avs = 0;
 static volatile int g_bar = 1;
 static volatile int g_opt = 0;       // setting: 0 off, 1 on, 2 A/B
+static volatile int g_drs = 0, g_sharp = 1;   // settings: dynamic resolution, sharpening (f 2nd)
 static volatile int g_opt_on = 0;    // what the hooks use: 0 off, 1 on
 static int g_window_opt = 1;         // g_opt_on during the last log window
 static volatile SceUID g_main_thid = -1;   // the thread that runs RenderStage
@@ -341,6 +342,8 @@ static void update_text(void) {
                 g_avs ? "ON" : "OFF", g_opt == 2 ? "  OPT A/B" : g_opt ? "  OPT" : "",
                 (g_perf.fps10 + 5) / 10, MS(g_perf.cpu10), MS(g_perf.gpu10),
                 MS(g_perf.vs10), MS(g_perf.s3d10), prof);
+        if (g_drs && g_perf.res_w > 0 && n < size - 12)   // dynamic resolution: the 3D width now
+            n += sceClibSnprintf(t + n, size - n, " res %d", g_perf.res_w);
     }
     g_text_len[i] = n > LINE_CHARS ? LINE_CHARS : n;
     g_text_idx = i;
@@ -666,6 +669,8 @@ static void settings_current(game_settings_t *gs) {
     gs->bar = g_bar;
     gs->rec = g_rec;
     gs->opt = g_opt;
+    gs->drs = g_drs;
+    gs->sharp = g_sharp;
 }
 
 static void settings_apply(const game_settings_t *gs) {
@@ -675,6 +680,10 @@ static void settings_apply(const game_settings_t *gs) {
     g_bar = gs->bar;
     g_rec = gs->rec;
     g_opt = gs->opt >= 0 && gs->opt <= 2 ? gs->opt : 0;
+    g_drs = gs->drs != 0;
+    g_sharp = gs->sharp != 0;
+    drs_set_enabled(g_drs);
+    sharpen_set_enabled(g_sharp);
     g_dirty = 1;   // the render thread redraws the status line
 }
 

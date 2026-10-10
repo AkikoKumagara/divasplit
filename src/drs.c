@@ -25,10 +25,11 @@
  * Controller, per frame, on the main thread's own timings: a frame is late
  * past 16.7 ms; GPU-bound when it also waited for the GPU (BeginScene /
  * EndScene / display queue). Half of 8 frames late and GPU-bound: one step
- * down at once, more when the GPU wait is long (fewer size changes: each one
- * shows briefly as a ghost of the previous frames). A second of frames on time with vblank slack and little GPU
- * wait: one step up, but only after a hold that doubles each time a step up
- * is undone within two seconds (and resets after ten quiet seconds).
+ * down at once, more when the GPU wait is long (fewer size changes). A second
+ * with little GPU wait: one step up, whatever the frame rate (a lower
+ * resolution doesn't help a frame the CPU makes late), but only after a hold
+ * that doubles each time a step up is undone within two seconds (and resets
+ * after ten quiet seconds).
  */
 #include <psp2/kernel/clib.h>
 #include <taihen.h>
@@ -38,8 +39,8 @@
 
 #define STEP 32          // width per level
 #define LATE_US 17200
-#define GPU_BOUND_US 1000
-#define SLACK_US 3000
+#define GPU_BOUND_US 2000    // a step down: late frames that also waited this long for the GPU
+#define GPU_FREE_US 800      // a step up: a second averaging less GPU wait than this
 
 static tai_hook_ref_t s_ref;
 static uintptr_t s_seg1;
@@ -50,6 +51,7 @@ static int s_min = 480, s_max = 720;
 static int s_level;              // 0 = s_max, each level STEP narrower
 static int s_w;                  // width this frame (0: not applied)
 static int s_applied;            // this frame used our size: its timings count
+static volatile int s_enabled;   // the setting
 
 static unsigned int f_n, f_late, f_gpu, f_vs;        // down window (8 frames)
 static unsigned int u_n, u_late, u_gpu, u_vs;        // up window (60 frames)
@@ -79,7 +81,7 @@ static void stage0_hook(uint8_t *mgr) {
         return;
     int bw = *(volatile int *)(mgr + 0x38), bh = *(volatile int *)(mgr + 0x3C);   // the engine's size
     int w = bw, h = bh;
-    if (opt_cut_on(OPT_DRS)) {
+    if (s_enabled && opt_cut_on(OPT_DRS)) {
         w = level_w(s_level);
         h = height_of(w);
         s_applied = 1;
@@ -134,8 +136,7 @@ void drs_frame(unsigned int frame_us, unsigned int gpu_us, unsigned int vs_us) {
         f_n = f_late = f_gpu = f_vs = 0;
     }
     if (u_n >= 60) {
-        if (u_late == 0 && u_vs / u_n > SLACK_US && u_gpu / u_n < GPU_BOUND_US / 2 && s_level > 0
-                && s_since_change >= s_up_hold) {
+        if (u_gpu / u_n < GPU_FREE_US && s_level > 0 && s_since_change >= s_up_hold) {
             s_level--;
             d_up++;
             s_since_change = 0;
@@ -145,6 +146,10 @@ void drs_frame(unsigned int frame_us, unsigned int gpu_us, unsigned int vs_us) {
         }
         u_n = u_late = u_gpu = u_vs = 0;
     }
+}
+
+void drs_set_enabled(int on) {
+    s_enabled = on;
 }
 
 void drs_set_range(int min_w, int max_w) {

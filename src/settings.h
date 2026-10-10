@@ -45,6 +45,7 @@ static const preset_t PRESETS[] = {
 
 typedef struct {
     int preset, sync, avs, bar, rec, opt;
+    int drs, sharp;   // dynamic resolution, sharpening of the 3D image (f 2nd)
 } game_settings_t;
 
 typedef struct {
@@ -62,6 +63,8 @@ static inline void settings_defaults(settings_t *s) {
         s->game[i].rec = 0;
         // the engine optimizations exist for f 2nd only (opt.c)
         s->game[i].opt = sceClibStrncmp(SETTINGS_GAME_TAG[i], "F2ND", 5) == 0;
+        s->game[i].drs = 0;     // lowers the resolution: asked for, not by default
+        s->game[i].sharp = 1;   // only acts below 640 wide (drs, or VitaGrafix IB)
     }
 }
 
@@ -119,6 +122,8 @@ static inline void settings_load(settings_t *s) {
                 settings_get_int(sp, end, "bar", &gs->bar);
                 settings_get_int(sp, end, "rec", &gs->rec);
                 settings_get_int(sp, end, "opt", &gs->opt);
+                settings_get_int(sp, end, "drs", &gs->drs);
+                settings_get_int(sp, end, "sharp", &gs->sharp);
                 if (gs->preset < 0 || gs->preset >= PRESET_COUNT)
                     gs->preset = 0;
             }
@@ -134,8 +139,8 @@ static inline int settings_save(const settings_t *s) {
         n += sceClibSnprintf(buf + n, sizeof(buf) - n, "active=%s\n", SETTINGS_GAME_TAG[s->active]);
     for (int i = 0; i < SETTINGS_GAME_COUNT; i++) {
         const game_settings_t *gs = &s->game[i];
-        n += sceClibSnprintf(buf + n, sizeof(buf) - n, "%s preset=%d sync=%d avs=%d bar=%d rec=%d opt=%d\n",
-                SETTINGS_GAME_TAG[i], gs->preset, gs->sync, gs->avs, gs->bar, gs->rec, gs->opt);
+        n += sceClibSnprintf(buf + n, sizeof(buf) - n, "%s preset=%d sync=%d avs=%d bar=%d rec=%d opt=%d drs=%d sharp=%d\n",
+                SETTINGS_GAME_TAG[i], gs->preset, gs->sync, gs->avs, gs->bar, gs->rec, gs->opt, gs->drs, gs->sharp);
     }
     sceIoMkdir(SETTINGS_DIR, 0777);
     SceUID fd = sceIoOpen(SETTINGS_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
@@ -148,7 +153,7 @@ static inline int settings_save(const settings_t *s) {
 
 static inline int game_settings_equal(const game_settings_t *a, const game_settings_t *b) {
     return a->preset == b->preset && a->sync == b->sync && a->avs == b->avs
-        && a->bar == b->bar && a->rec == b->rec && a->opt == b->opt;
+        && a->bar == b->bar && a->rec == b->rec && a->opt == b->opt && a->drs == b->drs && a->sharp == b->sharp;
 }
 
 #endif
