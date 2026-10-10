@@ -62,6 +62,8 @@ typedef struct opt_r2 {
     uint32_t stub_tls, stub_set_vp, stub_uaddr, stub_vaddr;   // the game's import stubs (ARM)
     uint32_t d_gl;           // the engine's GL state "G"
     uint32_t d_tls_render;   // TLS descriptor of the render-context index (0: one context)
+    uint32_t alloc_size[2];  // operator new sizes served from pools on the main thread (0: none)
+    uint32_t alloc_count[2]; // slots per pool
     opt_ulayout_t u;         // the uniform system's layout
 } opt_r2_t;
 
@@ -84,9 +86,10 @@ enum {
     OPT_SHARPEN = 1 << 13,  // sharpening of the 3D image as it is stretched to the screen (sharpen.c)
     OPT_DRS = 1 << 14,      // dynamic resolution of the 3D world (drs.c)
     OPT_REGION = 1 << 15,   // valid regions for the 3D / tonemap / stage-2 scenes (drs.c)
+    OPT_ALLOC = 1 << 16,    // f: the per-frame list nodes from pools instead of the C++ heap
 };
 #define OPT_DEFAULT (OPT_CENTRE | OPT_DIRTY | OPT_LSORT | OPT_UREUSE | OPT_MATDUP | OPT_PALETTE \
-        | OPT_TEXWRAP | OPT_KEYSET | OPT_H2F | OPT_NOLOG | OPT_SHARPEN | OPT_DRS | OPT_REGION)
+        | OPT_TEXWRAP | OPT_KEYSET | OPT_H2F | OPT_NOLOG | OPT_SHARPEN | OPT_DRS | OPT_REGION | OPT_ALLOC)
 
 // engine optimizations (opt.c); *on switches them at run time
 int opt_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, uint32_t matmul_off,

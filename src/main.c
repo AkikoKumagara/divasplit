@@ -219,6 +219,8 @@ static const opt_r2_t F_R2 = {
     .mat = {0x3D7E4E, F_MAT_ORIG, 16, F_G_HEAD, 2, MAT_TAIL},
     .mvp = {0x3D7924, F_MVP_ORIG, 16, F_G_HEAD, 2, F_MVP_TAIL},
     .transpose = 0x3CE20C, .dsc_trace = 0x405D3A, .stub_set_vp = 0x5AA5E8, .d_gl = 0x2FC6B8,
+    // 3D draw-list nodes (12 bytes) and 2D sprite nodes (0xE0): pools (opt.c "alloc")
+    .alloc_size = {12, 0xE0}, .alloc_count = {8192, 2048},
     .u = {.t = 0x2EA88, .f = 0x2FDD8, .rec = 0x364, .rec_vprog = 0x2C, .rec_entries = 0x30, .rec_count = 0x1B0,
           .rec_frag = 0x1B4, .mv = 0x55C, .p = 0x570, .dprog = 0x6E8, .dtex = 0x5A8, .mat_src = 0x30A6C,
           .mat_t = 0x2FD48, .mat_f = 0x30418, .mat_arg = 0x305E8, .mvp_t = 0x1310, .mvp_dup = 0x1000,
@@ -787,7 +789,7 @@ static void opt_file_load(void) {
         unsigned int bit;
     } KEYS[] = {{"centre", OPT_CENTRE}, {"dirty", OPT_DIRTY}, {"lsort", OPT_LSORT},
             {"nosort0", OPT_NOSORT0}, {"pin", OPT_PIN}, {"check", OPT_CHECK},
-            {"ureuse", OPT_UREUSE}, {"matdup", OPT_MATDUP}, {"palette", OPT_PALETTE}, {"sharpen", OPT_SHARPEN}, {"drs", OPT_DRS}, {"region", OPT_REGION},
+            {"ureuse", OPT_UREUSE}, {"matdup", OPT_MATDUP}, {"palette", OPT_PALETTE}, {"sharpen", OPT_SHARPEN}, {"drs", OPT_DRS}, {"region", OPT_REGION}, {"alloc", OPT_ALLOC},
             {"texwrap", OPT_TEXWRAP}, {"keyset", OPT_KEYSET}, {"h2f", OPT_H2F}, {"nolog", OPT_NOLOG}};
     static char buf[1024];   // the input thread, after module_start
     unsigned int mask = OPT_DEFAULT, ab = 0;

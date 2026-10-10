@@ -74,6 +74,7 @@
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/sysmem.h>
 #include <taihen.h>
 
 #include "opt.h"
@@ -904,6 +905,116 @@ static int h2f_selftest(void) {
 // rejoins at 0x3367D4 with the same r7
 static const uint8_t LOG_ORIG[2] = {0x13, 0xd1}, LOG_NEW[2] = {0x00, 0xbf};
 
+/* ---- alloc (f): pools for the per-frame list nodes ----------------------- */
+
+// f fills its 23 3D draw lists (12-byte std::list nodes, 0x258A34 -> 0x259A0A..)
+// and 32 2D sprite lists (0xE0-byte nodes, 0x37BB02) every frame and frees
+// them after drawing: ~0.8 ms a heavy frame in SceLibstdcxx's operator new /
+// delete. Those two sizes, asked for on the main thread, come from pools; any
+// pointer inside a pool goes back to it, whichever thread frees it. Only the
+// main thread takes from a pool, so a lock-free stack (LDREX/STREX) needs no
+// ABA care. Everything else, and a full pool, goes to the C++ heap as before.
+// Only the addresses differ, and the lists don't depend on them.
+#define NID_LIB_STDCXX 0xF7629240
+#define NID_NEW        0xF99ED5AC   // operator new(unsigned int)
+#define NID_DELETE     0x72293931   // operator delete(void *)
+
+typedef struct {
+    uint32_t size, slot, count;   // request size, bytes per slot (8-aligned), slots
+    uint8_t *base, *end;
+    uint32_t bump;                // slots from here on never handed out (main thread only)
+    void *volatile free;          // freed slots
+    volatile uint32_t d_new, d_del, d_full, d_peak;
+} pool_t;
+static pool_t s_pool[2];
+static int s_npool;
+static SceUID s_pool_mem = -1;
+enum { A_NEW, A_DELETE, A_HOOKS };
+static tai_hook_ref_t s_aref[A_HOOKS];
+static SceUID s_ahook[A_HOOKS] = {-1, -1};
+
+static void *pool_take(pool_t *p) {
+    void *h;
+    do {
+        h = p->free;
+        if (!h)
+            break;
+    } while (!__sync_bool_compare_and_swap(&p->free, h, *(void *const *)h));
+    if (!h && p->bump < p->count)
+        h = p->base + p->slot * p->bump++;
+    return h;
+}
+
+static void pool_give(pool_t *p, void *x) {
+    void *h;
+    do {
+        h = p->free;
+        *(void **)x = h;
+    } while (!__sync_bool_compare_and_swap(&p->free, h, x));
+}
+
+static void *new_hook(unsigned int n) {
+    if (on_main() && cut_on(OPT_ALLOC)) {
+        for (int i = 0; i < s_npool; i++) {
+            pool_t *p = &s_pool[i];
+            if (n != p->size)
+                continue;
+            void *x = pool_take(p);
+            if (x) {
+                uint32_t live = ++p->d_new - p->d_del;
+                if (live > p->d_peak)
+                    p->d_peak = live;
+                return x;
+            }
+            p->d_full++;
+            break;
+        }
+    }
+    return TAI_CONTINUE(void *, s_aref[A_NEW], n);
+}
+
+static void delete_hook(void *x) {
+    for (int i = 0; i < s_npool; i++) {
+        pool_t *p = &s_pool[i];
+        if ((uint8_t *)x >= p->base && (uint8_t *)x < p->end) {
+            pool_give(p, x);
+            __sync_fetch_and_add(&p->d_del, 1);
+            return;
+        }
+    }
+    TAI_CONTINUE(void, s_aref[A_DELETE], x);
+}
+
+// at game start (hot imports must be hooked before the game calls them)
+static void alloc_init(const opt_r2_t *r2) {
+    uint32_t total = 0;
+    for (int i = 0; i < 2 && r2->alloc_size[i]; i++) {
+        pool_t *p = &s_pool[s_npool++];
+        p->size = r2->alloc_size[i];
+        p->slot = (p->size + 7) & ~7u;
+        p->count = r2->alloc_count[i];
+        total += p->slot * p->count;
+    }
+    if (!s_npool)
+        return;
+    s_pool_mem = sceKernelAllocMemBlock("divasplit_pools", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, (total + 4095) & ~4095u, NULL);
+    if (s_pool_mem < 0) {
+        s_npool = 0;
+        return;
+    }
+    uint8_t *m;
+    sceKernelGetMemBlockBase(s_pool_mem, (void **)&m);
+    for (int i = 0; i < s_npool; i++) {
+        s_pool[i].base = m;
+        m += s_pool[i].slot * s_pool[i].count;
+        s_pool[i].end = m;
+    }
+    // delete first: once new can hand out pool slots, delete must know them
+    s_ahook[A_DELETE] = taiHookFunctionImport(&s_aref[A_DELETE], TAI_MAIN_MODULE, NID_LIB_STDCXX, NID_DELETE, delete_hook);
+    if (s_ahook[A_DELETE] >= 0)
+        s_ahook[A_NEW] = taiHookFunctionImport(&s_aref[A_NEW], TAI_MAIN_MODULE, NID_LIB_STDCXX, NID_NEW, new_hook);
+}
+
 /* ---- install / diag ------------------------------------------------------ */
 
 void opt_set_stage_ptr(volatile const int *stage) {
@@ -998,6 +1109,7 @@ static void r2_init(SceUID modid, const opt_r2_t *r2) {
         s_r2hook[R2_TEX] = taiHookFunctionOffset(&s_r2ref[R2_TEX], modid, 0, r2->texparam, 1, texparam_hook);
     if (r2->keyset_loop)
         s_r2hook[R2_KS] = taiHookFunctionOffset(&s_r2ref[R2_KS], modid, 0, r2->keyset_loop, 1, keyset_hook);
+    alloc_init(r2);
 }
 
 static void r2_shutdown(void) {
@@ -1010,6 +1122,13 @@ static void r2_shutdown(void) {
         if (s_r2inj[i] >= 0)
             taiInjectRelease(s_r2inj[i]);
         s_r2inj[i] = -1;
+    }
+    // new first (no more pool slots handed out), then delete; the pools' memory
+    // stays: slots still in use belong to the game until it exits
+    for (int i = 0; i < A_HOOKS; i++) {
+        if (s_ahook[i] >= 0)
+            taiHookRelease(s_ahook[i], s_aref[i]);
+        s_ahook[i] = -1;
     }
 }
 
@@ -1044,8 +1163,13 @@ int opt_diag2(char *buf, int size, int part) {
                 n += sceClibSnprintf(buf + n, size - n, " s%d %u/%u", st, d_ur_st_skip[st], d_ur_st_calls[st]);
         return n;
     }
-    return sceClibSnprintf(buf, size,
-            "r2: mat %u mvp %u tex %u", d_mat_fast, d_mvp_fast, d_tex_fast);
+    int n = sceClibSnprintf(buf, size, "r2: mat %u mvp %u tex %u", d_mat_fast, d_mvp_fast, d_tex_fast);
+    if (s_npool)
+        n += sceClibSnprintf(buf + n, size - n, "; alloc hooks %X %X", s_ahook[A_NEW], s_ahook[A_DELETE]);
+    for (int i = 0; i < s_npool && n < size - 64; i++)
+        n += sceClibSnprintf(buf + n, size - n, "; %u B: new %u del %u peak %u/%u full %u", s_pool[i].size,
+                s_pool[i].d_new, s_pool[i].d_del, s_pool[i].d_peak, s_pool[i].count, s_pool[i].d_full);
+    return n;
 }
 
 void opt_set_scenes_tracked(int ok) {
