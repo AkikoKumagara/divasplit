@@ -45,7 +45,7 @@ typedef struct {
     unsigned int size;
 } block_t;
 
-enum { B_HOST, B_PATCH, B_VUSSE, B_FUSSE, B_PROGS, B_QUAD, B_COLOR, B_COUNT };
+enum { B_HOST, B_PATCH, B_VUSSE, B_FUSSE, B_PROGS, B_QUAD, B_COLOR, B_RTMEM, B_COUNT };
 static block_t s_b[B_COUNT];
 static int s_mapped[B_COUNT], s_vusse_map, s_fusse_map;
 static SceClibMspace s_host;
@@ -75,6 +75,18 @@ static SceGxmTexture s_out;     // s_src's descriptor, our data
 static unsigned int s_tw, s_th, s_tstride;
 static SceGxmTextureFormat s_tfmt;
 static volatile unsigned int d_passes, d_swaps, d_one, d_bad;
+// why the last pass didn't run (diag): step, error, and the source texture
+enum { W_OK, W_NOTEX, W_FORMAT, W_TYPE, W_SIZE, W_ALLOC, W_MAP, W_SURFACE, W_RTSIZE, W_RTALLOC, W_RT,
+       W_AREA, W_BEGIN, W_UNIFORMS };
+static int s_why, s_why_err, s_target_fail;
+static unsigned int s_src_fmt, s_src_type, s_src_w, s_src_h;
+
+static int why(int step, int err) {
+    s_why = step;
+    s_why_err = err;
+    d_bad++;
+    return 0;
+}
 
 /* ---- memory and programs ---------------------------------------------- */
 
@@ -221,49 +233,78 @@ static int gpu_setup(void) {
     return 1;
 }
 
-// our texture and render target like src: made once (the game never reallocates FBO 11)
-static int ensure_target(const SceGxmTexture *src) {
-    unsigned int w = sceGxmTextureGetWidth(src), h = sceGxmTextureGetHeight(src);
-    SceGxmTextureFormat fmt = sceGxmTextureGetFormat(src);
-    SceGxmTextureType type = sceGxmTextureGetType(src);
-    unsigned int stride = type == SCE_GXM_TEXTURE_LINEAR_STRIDED ? sceGxmTextureGetStride(src) / 4 : ALIGN(w, 8);
-    if (s_rt)
-        return w == s_tw && h == s_th && fmt == s_tfmt && stride == s_tstride;
+// our texture and render target like src: made once (the game never reallocates
+// FBO 11); a failure is final (no allocating again every frame)
+static int make_target(const SceGxmTexture *src) {
+    unsigned int w = s_src_w, h = s_src_h;
+    SceGxmTextureFormat fmt = (SceGxmTextureFormat)s_src_fmt;
+    SceGxmTextureType type = (SceGxmTextureType)s_src_type;
     SceGxmColorFormat cf;
     if (fmt == SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR)
         cf = SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR;
     else if (fmt == SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB)
         cf = SCE_GXM_COLOR_FORMAT_U8U8U8U8_ARGB;
     else
-        return 0;
-    if ((type != SCE_GXM_TEXTURE_LINEAR && type != SCE_GXM_TEXTURE_LINEAR_STRIDED) || w > 2048 || h > 2048)
-        return 0;
+        return why(W_FORMAT, (int)fmt);
+    if (type != SCE_GXM_TEXTURE_LINEAR && type != SCE_GXM_TEXTURE_LINEAR_STRIDED)
+        return why(W_TYPE, (int)type);
+    if (w < 16 || h < 16 || w > 2048 || h > 2048)
+        return why(W_SIZE, (int)(w << 16 | h));
+    unsigned int stride = type == SCE_GXM_TEXTURE_LINEAR_STRIDED ? sceGxmTextureGetStride(src) / 4 : ALIGN(w, 8);
     // video memory if there is any left, else main memory
     unsigned int size = stride * h * 4;
-    if (block_alloc(&s_b[B_COLOR], "divasplit_sh_color", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, 256 * 1024) < 0
-            && block_alloc(&s_b[B_COLOR], "divasplit_sh_color", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, size, 4096) < 0)
-        return 0;
-    if (gpu_map(B_COLOR, SCE_GXM_MEMORY_ATTRIB_RW) < 0)
-        return 0;
-    if (sceGxmColorSurfaceInit(&s_surf, cf, SCE_GXM_COLOR_SURFACE_LINEAR, SCE_GXM_COLOR_SURFACE_SCALE_NONE,
-            SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h, stride, s_b[B_COLOR].base) < 0)
-        return 0;
+    int r = block_alloc(&s_b[B_COLOR], "divasplit_sh_color", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, 256 * 1024);
+    if (r < 0 && (r = block_alloc(&s_b[B_COLOR], "divasplit_sh_color", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE,
+            size, 4096)) < 0)
+        return why(W_ALLOC, r);
+    if ((r = gpu_map(B_COLOR, SCE_GXM_MEMORY_ATTRIB_RW)) < 0)
+        return why(W_MAP, r);
+    if ((r = sceGxmColorSurfaceInit(&s_surf, cf, SCE_GXM_COLOR_SURFACE_LINEAR, SCE_GXM_COLOR_SURFACE_SCALE_NONE,
+            SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h, stride, s_b[B_COLOR].base)) < 0)
+        return why(W_SURFACE, r);
+    // the driver's memory as the game makes it (sceGxmGetRenderTargetMemSize, then a block)
     SceGxmRenderTargetParams rp;
     sceClibMemset(&rp, 0, sizeof(rp));
     rp.width = (uint16_t)w;
     rp.height = (uint16_t)h;
     rp.scenesPerFrame = 1;
     rp.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
-    rp.driverMemBlock = -1;
-    if (sceGxmCreateRenderTarget(&rp, &s_rt) < 0) {
+    unsigned int dsize = 0;
+    if ((r = sceGxmGetRenderTargetMemSize(&rp, &dsize)) < 0)
+        return why(W_RTSIZE, r);
+    if ((r = block_alloc(&s_b[B_RTMEM], "divasplit_sh_rt", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, dsize, 4096)) < 0)
+        return why(W_RTALLOC, r);
+    rp.driverMemBlock = s_b[B_RTMEM].uid;
+    if ((r = sceGxmCreateRenderTarget(&rp, &s_rt)) < 0) {
         s_rt = NULL;
-        return 0;
+        return why(W_RT, r);
     }
     s_tw = w;
     s_th = h;
     s_tfmt = fmt;
     s_tstride = stride;
     return 1;
+}
+
+static int ensure_target(const SceGxmTexture *src) {
+    s_src_w = sceGxmTextureGetWidth(src);
+    s_src_h = sceGxmTextureGetHeight(src);
+    s_src_fmt = (unsigned int)sceGxmTextureGetFormat(src);
+    s_src_type = (unsigned int)sceGxmTextureGetType(src);
+    if (s_rt)   // the texture we were made for?
+        return (s_src_w == s_tw && s_src_h == s_th && s_src_fmt == (unsigned int)s_tfmt) || why(W_SIZE, -1);
+    if (s_target_fail)
+        return why(s_why, s_why_err);
+    if (make_target(src))
+        return 1;
+    s_target_fail = 1;
+    // give back what was made
+    if (s_mapped[B_COLOR])
+        sceGxmUnmapMemory(s_b[B_COLOR].base);
+    s_mapped[B_COLOR] = 0;
+    block_free(&s_b[B_COLOR]);
+    block_free(&s_b[B_RTMEM]);
+    return 0;
 }
 
 /* ---- the pass and the blit ---------------------------------------------- */
@@ -277,10 +318,10 @@ static const SceGxmTexture *engine_tex(const uint8_t *obj) {
 // the sharpened copy of the image the last blit drew from: returns 1 if made
 static int pass(SceGxmContext *ctx) {
     const SceGxmTexture *src = engine_tex(s_src);
-    if (!src || !ensure_target(src)) {
-        d_bad++;
+    if (!src)
+        return why(W_NOTEX, 0);
+    if (!ensure_target(src))
         return 0;
-    }
     float u0 = s_uv[0], v0 = s_uv[1], u1 = s_uv[2], v1 = s_uv[3];
     float tw = (float)s_tw, th = (float)s_th;
     int x1 = (int)((u1 > u0 ? u1 : u0) * tw + 0.5f), y1 = (int)((v1 > v0 ? v1 : v0) * th + 0.5f);
@@ -289,15 +330,12 @@ static int pass(SceGxmContext *ctx) {
         d_one++;
         return 0;
     }
-    if (x0 < 0 || y0 < 0 || x1 > (int)s_tw || y1 > (int)s_th || x1 - x0 < 16 || y1 - y0 < 16) {
-        d_bad++;
-        return 0;
-    }
+    if (x0 < 0 || y0 < 0 || x1 > (int)s_tw || y1 > (int)s_th || x1 - x0 < 16 || y1 - y0 < 16)
+        return why(W_AREA, x1 << 16 | y1);
     SceGxmValidRegion vr = {(unsigned int)x1 - 1, (unsigned int)y1 - 1};   // from (0, 0): the image's corner
-    if (sceGxmBeginScene(ctx, 0, s_rt, &vr, NULL, NULL, &s_surf, NULL) < 0) {
-        d_bad++;
-        return 0;
-    }
+    int r = sceGxmBeginScene(ctx, 0, s_rt, &vr, NULL, NULL, &s_surf, NULL);
+    if (r < 0)
+        return why(W_BEGIN, r);
     // the image's area, rows from the top, the same in our copy as in the source
     float w = (float)(x1 - x0), h = (float)(y1 - y0);
     sceGxmSetViewport(ctx, x0 + w * 0.5f, w * 0.5f, y0 + h * 0.5f, -h * 0.5f, 0.5f, 0.5f);
@@ -323,10 +361,9 @@ static int pass(SceGxmContext *ctx) {
         sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLE_STRIP, SCE_GXM_INDEX_FORMAT_U16, s_idx, 4);
     }
     sceGxmEndScene(ctx, NULL, NULL);
-    if (!vb || !fb) {
-        d_bad++;
-        return 0;
-    }
+    if (!vb || !fb)
+        return why(W_UNIFORMS, 0);
+    s_why = W_OK;
     s_out = *src;   // the engine's sampling settings, our pixels
     sceGxmTextureSetData(&s_out, s_b[B_COLOR].base);
     d_passes++;
@@ -431,6 +468,8 @@ void sharpen_set_strength(int percent) {
 }
 
 int sharpen_diag(char *buf, int size) {
-    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X amount %d%%; passes %u swaps %u 1:1 %u bad %u",
-            s_state, s_hook, (int)(s_amount * 50.0f + 0.5f), d_passes, d_swaps, d_one, d_bad);
+    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X amount %d%%; passes %u swaps %u 1:1 %u bad %u"
+            " (step %d err %08X; image %ux%u fmt %08X type %08X)",
+            s_state, s_hook, (int)(s_amount * 50.0f + 0.5f), d_passes, d_swaps, d_one, d_bad,
+            s_why, (unsigned)s_why_err, s_src_w, s_src_h, s_src_fmt, s_src_type);
 }
