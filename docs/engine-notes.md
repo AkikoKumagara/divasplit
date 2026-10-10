@@ -150,16 +150,16 @@ checks `centre` and `lsort` on the host against the game's versions.
 | Cut | Where | What | Expected (light / heavy frames) |
 |---|---|---|---|
 | `centre` | hook `0x245CDC` | The 3D sort keys average a skinned object's centre over its bones: per bone `xform(inverse(W) * B_i * (W * X), c)`, two 4x4 products and a transform. Linear in `B_i`: sum the bones first, then one product chain. Same up to float rounding (host test: 8e-6 relative). Called only from `0x246050` (stage 3, main thread). | 0.45 / 0.8 ms |
-| `dirty` | patch `0x4DF012` (32 bytes) | `0x4DEF04` (once per draw flush, gated by `[T+0x1B50]`) clears 224 dirty-flag bytes at `T+0x1A2A` one by one (`if (b) b = 0`); patched once at game start to call the plugin, which compares a word at a time and writes only words that aren't 0 (cut on), or runs the same loop (off). Same memory afterwards. The first build called `sceClibMemset` here: see below. Patching it at run time instead (for A/B) risks a core still holding the old bytes. | 0.4–0.5 / 0.55–0.65 ms |
+| `dirty` | patch `0x4DF012` (32 bytes) | `0x4DEF04` (once per draw flush, gated by `[T+0x1B50]`) clears 224 dirty-flag bytes at `T+0x1A2A` one by one (`if (b) b = 0`); patched once at game start to call the plugin, which does one `sceClibMemset` (cut on; timed on the console: 0.15 µs against the loop's 2.8 µs) or the same loop (off). Same memory afterwards. Patching it at run time instead (for A/B) risks a core still holding the old bytes. | 0.4–0.5 / 0.55–0.65 ms |
 | `lsort` | hook `0x5ABB9C` | `std::list::sort` of the draw lists allocates 27 list heads per call from a locked heap. Bottom-up merge sort over static arrays: stable, the same order. Callers `0x246A68/90/B0` only. | 0.08 / 0.15 ms |
 | `nosort0` | stage table byte `0x81B628A1` | Skip sorting the opaque list 0 front to back (`0x265ACE`). Changes draw order (coplanar flicker possible); off by default. | +0.2 ms on top of the others |
 
-Measured (2026-10-10, f 2nd heavy PV, A/B, 180 paired seconds, first build
-with `sceClibMemset` in `dirty`): stage 3 −0.65 ms per frame in every 20 s
-block, but the rest of the main thread +0.35 ms, net cpu −0.29 ms, fps
-unchanged within noise. Only `dirty` runs outside stage 3, so the library call
-per flush (~150–200 a frame) cost more than the byte loop it replaced. The
-next build clears inline and times both at start (diag.txt `r2:` line).
+Measured (2026-10-10, f 2nd heavy PV, A/B, 180 paired seconds): stage 3
+−0.65 ms per frame in every 20 s block, but the rest of the main thread
++0.35 ms, net cpu −0.29 ms, fps unchanged within noise. Not `sceClibMemset`:
+timed at start on the console, 224 bytes take 0.15 µs with it, 0.8 µs with
+an inline word loop and 2.8 µs with the game's byte loop. Still unexplained;
+log.csv now has each stage's CPU time (`st0`..`st7`) to locate it.
 
 Round 2 (on top of the above; profile ms, about 8% inflated by the sampler).
 `test/test_r2.c` checks `keyset` and `h2f` on the host against vectors made by
@@ -179,6 +179,15 @@ emulating the game's machine code.
 
 `h2f` and `nolog` are patched at start if set then; `earlykick`, `ekcheck`
 and `ucopy` are hooked only if set at start.
+
+Validation run (2026-10-10, 3 songs, `check=1`, first 3 minutes in diag.txt):
+`ureuse` reused 255568 of 311603 2D pre-draws, every one compared with `T`,
+0 different. Hit rate by stage: s2 97%, s3 31%, s4 0% (37628 calls), s5 96%.
+`centre` checked on every call: largest difference 9e-6. `ekcheck` never ran
+(its gate, no PvOsageManager slot busy or ready, apparently never opened), so
+`earlykick` is parked. `h2f` didn't go in: the check of its original bytes
+included the movw/movt of the stack-canary address, which is relocated at
+load; now rebuilt for the load address.
 
 Stage 3 is not the only thing that grows in heavy frames: PVGAME ctrl
 (`0x5F1B40`) grows 0.23 → 0.48 ms, in the PV script `0x3256EC` → `0x325374` →
@@ -225,8 +234,6 @@ Stage 3 is not the only thing that grows in heavy frames: PVGAME ctrl
   promoted to `double` and passed in `d0`, not `s0`, so the game's function
   gets garbage. Hooks with float arguments call on through a prototyped
   pointer (`TAI_NEXT` in `src/opt.c`).
-- Don't call `sceClib*` functions in per-draw paths: a 224-byte
-  `sceClibMemset` per flush was slower than the game's byte loop.
 - Profiles split at 18 ms are biased (every function gains about one sample
   in the 17–19 ms buckets). Classify frames by vblank count instead.
 

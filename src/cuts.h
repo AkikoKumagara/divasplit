@@ -104,24 +104,6 @@ static inline void cuts_list_sort(dlist_t *l, less_fn less, lnode_t **a, lnode_t
     h->prev = prev;
 }
 
-// every byte of b[0, n) = c, comparing a word at a time and writing only the
-// words that differ (most flushes have no flag set: then nothing is written).
-// No library call: sceClibMemset, once per flush, made the first build's 2D
-// stages slower (A/B 2026-10-10: stage 3 -0.65 ms, the rest +0.35 ms)
-typedef uint32_t __attribute__((may_alias)) cuts_u32a;
-static inline __attribute__((always_inline)) void cuts_fill_changed(uint8_t *b, uint8_t c, unsigned int n) {
-    uint32_t cw = c * 0x01010101u;
-    for (; n != 0 && ((uintptr_t)b & 3) != 0; n--, b++)
-        if (*b != c)
-            *b = c;
-    for (; n >= 4; n -= 4, b += 4)
-        if (*(cuts_u32a *)b != cw)
-            *(cuts_u32a *)b = cw;
-    for (; n != 0; n--, b++)
-        if (*b != c)
-            *b = c;
-}
-
 /*
  * The f 2nd dirty-flag patch (32 bytes at seg0+0x4DF012, inside 0x4DEF04; r4 =
  * the uniform table T, callee-saved; lr was pushed on entry). The game's loop

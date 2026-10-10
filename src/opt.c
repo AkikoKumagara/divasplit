@@ -388,15 +388,15 @@ static const uint8_t DIRTY_ORIG[32] = {
     0xbe, 0xf1, 0xe0, 0x0f,   // cmp.w lr, #0xe0
     0xf6, 0xd3};              // blo loop
 // called by the patch (cuts.h) in place of that loop, from the main thread: the
-// game's loop with the cut off, fill_changed with it on (the same memory
-// afterwards). The patch goes in once, at game start: patching code the main
-// thread runs every frame, while it moves between cores, could meet a core
-// still holding the old bytes.
+// game's loop with the cut off, one memset with it on (the same memory
+// afterwards; timed at start on the console: 0.15 us against the loop's 2.8).
+// The patch goes in once, at game start: patching code the main thread runs
+// every frame, while it moves between cores, could meet a core still holding
+// the old bytes.
 static void *dirty_clear(void *p, int c, unsigned int n) {
     if (cut_on(OPT_DIRTY)) {
         d_dirty_fast++;
-        cuts_fill_changed((uint8_t *)p, (uint8_t)c, n);
-        return p;
+        return sceClibMemset(p, c, n);
     }
     volatile uint8_t *b = (volatile uint8_t *)p;
     for (unsigned int i = 0; i < n; i++)
@@ -798,9 +798,7 @@ static void palette_hook(const uint32_t *b, int n) {
     for (int i = 0; i < n; i++, b += 16, d += 12)
         for (int k = 0; k < 12; k++)
             d[k] = b[k];
-    volatile uint8_t *f = t + 0x1A2A + 0x20;   // byte stores, as the setter (no library call)
-    for (int i = 0; i < 3 * n; i++)
-        f[i] = 1;
+    sceClibMemset(t + 0x1A2A + 0x20, 1, 3 * n);
 }
 
 /* ---- texwrap ------------------------------------------------------------ */
@@ -868,8 +866,20 @@ static const uint8_t H2F_NEW[90] = {
     0x00, 0xee, 0x10, 0x0a, 0x70, 0x47, 0x6a, 0xb1, 0xb2, 0xfa, 0x82, 0xf3, 0xa3, 0xf1, 0x08, 0x01,
     0x02, 0xfa, 0x01, 0xf2, 0x22, 0xf4, 0x00, 0x02, 0xc3, 0xf1, 0x86, 0x03, 0x40, 0xea, 0xc3, 0x50,
     0x40, 0xea, 0x02, 0x00, 0x00, 0xee, 0x10, 0x0a, 0x70, 0x47};
-static const uint8_t H2F_ORIG[16] = {0xec, 0x46, 0x2d, 0xe9, 0x0f, 0x00, 0x2d, 0xe9,
-        0x30, 0x50, 0x82, 0xb0, 0x41, 0xf6, 0x4c, 0x75};
+// mov ip, sp; push.w {r0-r3}; push.w {r4, r5, ip, lr}; sub sp, #8; then
+// movw/movt r5 of the stack-canary word, seg0+0x661F4C: relocated at load, so
+// h2f_orig() builds those 8 bytes for where seg0 is
+static const uint8_t H2F_HEAD[12] = {0xec, 0x46, 0x2d, 0xe9, 0x0f, 0x00, 0x2d, 0xe9,
+        0x30, 0x50, 0x82, 0xb0};
+#define H2F_CANARY 0x661F4C
+static int h2f_orig(uint8_t o[20]) {
+    for (int i = 0; i < 12; i++)
+        o[i] = H2F_HEAD[i];
+    uint32_t a = (uint32_t)(s_seg0 + H2F_CANARY);
+    cuts_thumb_movw(o + 12, 0, 5, a & 0xFFFF);
+    cuts_thumb_movw(o + 16, 1, 5, a >> 16);
+    return 20;
+}
 
 // every input through the code at seg0+h2f against cuts_h2f_bits
 static int h2f_selftest(void) {
@@ -1122,34 +1132,6 @@ static void r2_frame(void) {
     s_ek_hashed = 0;
 }
 
-// once at start: what a library call costs here (diag part 0)
-static uint32_t s_bench[3];
-static __attribute__((noinline)) void bench_memset(uint8_t *b) {
-    sceClibMemset(b, 0, 224);
-}
-static __attribute__((noinline)) void bench_inline(uint8_t *b) {
-    cuts_fill_changed(b, 0, 224);
-}
-static __attribute__((noinline)) void bench_loop(uint8_t *b) {
-    volatile uint8_t *v = b;
-    for (int i = 0; i < 224; i++)
-        if (v[i])
-            v[i] = 0;
-}
-static void r2_bench(void) {
-    static uint8_t buf[256] __attribute__((aligned(4)));
-    void (*const fn[3])(uint8_t *) = {bench_memset, bench_inline, bench_loop};
-    for (int k = 0; k < 3; k++) {
-        uint64_t t0 = sceKernelGetProcessTimeWide();
-        for (int i = 0; i < 1000; i++) {
-            buf[2 + (i & 7)] = 1;   // T+0x1A2A is 2 mod 4; a flag or two set, like a 3D flush
-            fn[k](buf + 2);
-            __asm__ volatile("" ::: "memory");
-        }
-        s_bench[k] = (uint32_t)(sceKernelGetProcessTimeWide() - t0);
-    }
-}
-
 static SceUID r2_inject(SceUID modid, int which, uint32_t off, const uint8_t *orig, int norig,
         const uint8_t *bytes, int n) {
     if (sceClibMemcmp((const void *)(s_seg0 + off), orig, norig) != 0) {
@@ -1164,7 +1146,6 @@ static SceUID r2_inject(SceUID modid, int which, uint32_t off, const uint8_t *or
 
 static void r2_init(SceUID modid, const opt_r2_t *r2) {
     s_r2 = r2;
-    r2_bench();
     s_g = (uint8_t *)(s_seg1 + r2->d_gl);
     uint8_t *t = R2_T(s_g);
     s_flush_tex = (void_fn)(s_seg0 + r2->flush_tex + 1);
@@ -1194,7 +1175,9 @@ static void r2_init(SceUID modid, const opt_r2_t *r2) {
         if (e != 0) {
             s_r2err[R2P_H2F] = e;
         } else {
-            s_r2inj[R2P_H2F] = r2_inject(modid, R2P_H2F, r2->h2f, H2F_ORIG, sizeof(H2F_ORIG), H2F_NEW, sizeof(H2F_NEW));
+            uint8_t orig[20];
+            int no = h2f_orig(orig);
+            s_r2inj[R2P_H2F] = r2_inject(modid, R2P_H2F, r2->h2f, orig, no, H2F_NEW, sizeof(H2F_NEW));
             if (s_r2inj[R2P_H2F] >= 0 && (e = h2f_selftest()) != 0) {
                 taiInjectRelease(s_r2inj[R2P_H2F]);
                 s_r2inj[R2P_H2F] = -1;
@@ -1253,11 +1236,9 @@ int opt_diag2(char *buf, int size, int part) {
         unsigned int hooks = 0;
         for (int i = 0; i < R2_HOOKS; i++)
             hooks |= (unsigned int)(s_r2hook[i] >= 0) << i;
-        return sceClibSnprintf(buf, size, "r2: hooks %X patches %X %X %X %X err %X %X %X %X;"
-                " 1000 x 224-byte clear: sceClibMemset %u us, inline %u us, game loop %u us",
+        return sceClibSnprintf(buf, size, "r2: hooks %X patches %X %X %X %X err %X %X %X %X",
                 hooks, s_r2inj[R2P_MAT], s_r2inj[R2P_MVP], s_r2inj[R2P_H2F], s_r2inj[R2P_LOG],
-                (unsigned)s_r2err[0], (unsigned)s_r2err[1], (unsigned)s_r2err[2], (unsigned)s_r2err[3],
-                s_bench[0], s_bench[1], s_bench[2]);
+                (unsigned)s_r2err[0], (unsigned)s_r2err[1], (unsigned)s_r2err[2], (unsigned)s_r2err[3]);
     }
     if (part == 1)
         return sceClibSnprintf(buf, size,

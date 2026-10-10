@@ -31,6 +31,8 @@
  *   vs    time in sceDisplayWaitVblankStartMulti: the game waits for vblank
  *         on the main thread every frame (idle time at a solid 60)
  *   3d    CPU time of the 3D world stage when it runs (waits excluded)
+ * log.csv also has st0..st7: each render stage's CPU time per frame (waits for
+ * the GPU excluded); cpu minus their sum is the time outside the stages.
  *
  * Detail readout (X only): the game's own CPU profiler (uint32 microseconds of
  * the last frame, kept in the frame manager), averaged per second:
@@ -255,11 +257,14 @@ static uint64_t g_win_start, g_win_gpu_start, g_win_vs_start;
 static unsigned int g_win_late_start;
 static uint64_t g_win_3d;
 static unsigned int g_win_frames, g_win_3d_n;
+#define LOG_STAGES 8                  // per-stage CPU time columns st0..st7
+static uint64_t g_win_st[LOG_STAGES];
 static uint32_t g_win_prof[PROF_COUNT];
 
 typedef struct {
     int valid;
     int fps10, cpu10, gpu10, vs10, s3d10;  // tenths
+    int st10[LOG_STAGES];                  // CPU time per frame of each stage (waits for the GPU excluded)
     int late;                              // AVS-skipped waits in the last second
     int prof10[PROF_COUNT];
 } perf_t;
@@ -360,7 +365,11 @@ static void log_line(uint64_t now) {
                 p->groups / g_probe_frames, p->group_bytes / g_probe_frames,
                 p->same / g_probe_frames, p->same_bytes / g_probe_frames,
                 p->setdata, p->overflow);
+    } else {
+        n += sceClibSnprintf(line + n, LOG_LINE - n, ",,,,,,,,");
     }
+    for (int k = 0; k < LOG_STAGES && n < LOG_LINE - 16; k++)
+        n += sceClibSnprintf(line + n, LOG_LINE - n, ",%d.%d", MS(g_perf.st10[k]));
     line[n++] = '\n';
     g_log_len[head % LOG_SLOTS] = n;
     __sync_synchronize();
@@ -375,7 +384,8 @@ static void log_flush(void) {
             static const char hdr[] = "# divasplit 1.9 recording\n"
                 "t,game,preset,sync,avs,opt,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap,"
                 "main_run,main_ready,main_wait,core0,core1,core2,core3,"
-                "up_copies,up_bytes,up_blocks,up_block_bytes,up_reused,up_reused_bytes,up_setdata,up_overflow\n";
+                "up_copies,up_bytes,up_blocks,up_block_bytes,up_reused,up_reused_bytes,up_setdata,up_overflow,"
+                "st0,st1,st2,st3,st4,st5,st6,st7\n";
             sceIoWrite(g_log_fd, hdr, sizeof(hdr) - 1);
         }
     }
@@ -399,6 +409,7 @@ static void window_reset(uint64_t now) {
     g_win_late_start = g_late_total;
     g_win_frames = g_win_3d_n = 0;
     g_win_3d = 0;
+    sceClibMemset(g_win_st, 0, sizeof(g_win_st));
     sceClibMemset(g_win_prof, 0, sizeof(g_win_prof));
 }
 
@@ -446,6 +457,8 @@ static void frame_boundary(uint64_t now) {
     g_perf.vs10 = (int)(vs_us / 100);
     g_perf.cpu10 = (int)((frame_us > idle_us ? frame_us - idle_us : 0) / 100);
     g_perf.s3d10 = g_win_3d_n ? (int)(g_win_3d / g_win_3d_n / 100) : 0;
+    for (int k = 0; k < LOG_STAGES; k++)
+        g_perf.st10[k] = (int)(g_win_st[k] / g_win_frames / 100);
     g_perf.late = (int)(g_late_total - g_win_late_start);
     for (int k = 0; k < PROF_COUNT; k++)
         g_perf.prof10[k] = (int)(g_win_prof[k] / g_win_frames / 100);
@@ -489,8 +502,10 @@ static int render_stage_hook(int stage) {
     g_cur_stage = -1;
     if (tr0)
         trace_add(TR_STAGE, tr0, trace_now(), (uint32_t)stage, 0);
+    uint64_t busy = sceKernelGetProcessTimeWide() - t0 - (g_gpu_total - w0);
+    if (stage >= 0 && stage < LOG_STAGES)
+        g_win_st[stage] += busy;
     if (stage == g_game->stage_3d) {
-        uint64_t busy = sceKernelGetProcessTimeWide() - t0 - (g_gpu_total - w0);
         g_win_3d += busy;
         g_win_3d_n++;
     }
