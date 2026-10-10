@@ -186,8 +186,13 @@ Validation run (2026-10-10, 3 songs, `check=1`, first 3 minutes in diag.txt):
 `centre` checked on every call: largest difference 9e-6. `ekcheck` never ran
 (its gate, no PvOsageManager slot busy or ready, apparently never opened), so
 `earlykick` is parked. `h2f` didn't go in: the check of its original bytes
-included the movw/movt of the stack-canary address, which is relocated at
-load; now rebuilt for the load address.
+included the movw/movt of the stack-canary address, which the loader fills in
+(not seg0-relative either); now only their shape is checked.
+
+Timing run (2026-10-10, f 2nd heavy PV, AVS off, A/B, 200 windows): frame time
+−2.32 ± 0.34 ms, cpu −1.57; stage 5 2.26 → 1.14 ms, stage 3 −0.77, stage 4
++0.08, outside the stages +0.26 ± 0.22, GPU wait +0.20. fps 51.3 → 55.9
+(worst 10% of seconds 31.4 → 49.9; seconds at 60: 25% → 40%).
 
 Stage 3 is not the only thing that grows in heavy frames: PVGAME ctrl
 (`0x5F1B40`) grows 0.23 → 0.48 ms, in the PV script `0x3256EC` → `0x325374` →

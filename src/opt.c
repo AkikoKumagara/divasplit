@@ -867,18 +867,22 @@ static const uint8_t H2F_NEW[90] = {
     0x02, 0xfa, 0x01, 0xf2, 0x22, 0xf4, 0x00, 0x02, 0xc3, 0xf1, 0x86, 0x03, 0x40, 0xea, 0xc3, 0x50,
     0x40, 0xea, 0x02, 0x00, 0x00, 0xee, 0x10, 0x0a, 0x70, 0x47};
 // mov ip, sp; push.w {r0-r3}; push.w {r4, r5, ip, lr}; sub sp, #8; then
-// movw/movt r5 of the stack-canary word, seg0+0x661F4C: relocated at load, so
-// h2f_orig() builds those 8 bytes for where seg0 is
+// movw r5 / movt r5 of the stack-canary word, whose address the loader fills
+// in (it isn't seg0-relative: checked on the console), so only their shape is
+// compared. The self-test before and after patching is what proves it.
 static const uint8_t H2F_HEAD[12] = {0xec, 0x46, 0x2d, 0xe9, 0x0f, 0x00, 0x2d, 0xe9,
         0x30, 0x50, 0x82, 0xb0};
-#define H2F_CANARY 0x661F4C
-static int h2f_orig(uint8_t o[20]) {
-    for (int i = 0; i < 12; i++)
-        o[i] = H2F_HEAD[i];
-    uint32_t a = (uint32_t)(s_seg0 + H2F_CANARY);
-    cuts_thumb_movw(o + 12, 0, 5, a & 0xFFFF);
-    cuts_thumb_movw(o + 16, 1, 5, a >> 16);
-    return 20;
+static uint8_t s_h2f_seen[20];   // what was there instead (diag)
+static int h2f_is_orig(const uint8_t *c) {
+    if (sceClibMemcmp(c, H2F_HEAD, sizeof(H2F_HEAD)) != 0)
+        return 0;
+    for (int k = 0; k < 2; k++) {   // T3 movw, then movt, Rd = r5, any immediate
+        uint16_t hw1 = (uint16_t)(c[12 + 4 * k] | c[13 + 4 * k] << 8);
+        uint16_t hw2 = (uint16_t)(c[14 + 4 * k] | c[15 + 4 * k] << 8);
+        if ((hw1 & 0xFBF0) != (k ? 0xF2C0 : 0xF240) || (hw2 & 0x8F00) != 0x0500)
+            return 0;
+    }
+    return 1;
 }
 
 // every input through the code at seg0+h2f against cuts_h2f_bits
@@ -1175,9 +1179,14 @@ static void r2_init(SceUID modid, const opt_r2_t *r2) {
         if (e != 0) {
             s_r2err[R2P_H2F] = e;
         } else {
-            uint8_t orig[20];
-            int no = h2f_orig(orig);
-            s_r2inj[R2P_H2F] = r2_inject(modid, R2P_H2F, r2->h2f, orig, no, H2F_NEW, sizeof(H2F_NEW));
+            if (!h2f_is_orig((const uint8_t *)(s_seg0 + r2->h2f))) {
+                s_r2err[R2P_H2F] = 0x80000000;   // not the code we expect: leave it
+                sceClibMemcpy(s_h2f_seen, (const void *)(s_seg0 + r2->h2f), sizeof(s_h2f_seen));
+            } else {
+                s_r2inj[R2P_H2F] = taiInjectData(modid, 0, r2->h2f, H2F_NEW, sizeof(H2F_NEW));
+                if (s_r2inj[R2P_H2F] < 0)
+                    s_r2err[R2P_H2F] = s_r2inj[R2P_H2F];
+            }
             if (s_r2inj[R2P_H2F] >= 0 && (e = h2f_selftest()) != 0) {
                 taiInjectRelease(s_r2inj[R2P_H2F]);
                 s_r2inj[R2P_H2F] = -1;
@@ -1236,9 +1245,15 @@ int opt_diag2(char *buf, int size, int part) {
         unsigned int hooks = 0;
         for (int i = 0; i < R2_HOOKS; i++)
             hooks |= (unsigned int)(s_r2hook[i] >= 0) << i;
-        return sceClibSnprintf(buf, size, "r2: hooks %X patches %X %X %X %X err %X %X %X %X",
+        int n = sceClibSnprintf(buf, size, "r2: hooks %X patches %X %X %X %X err %X %X %X %X",
                 hooks, s_r2inj[R2P_MAT], s_r2inj[R2P_MVP], s_r2inj[R2P_H2F], s_r2inj[R2P_LOG],
                 (unsigned)s_r2err[0], (unsigned)s_r2err[1], (unsigned)s_r2err[2], (unsigned)s_r2err[3]);
+        if (s_r2err[R2P_H2F] == (int)0x80000000 && n < size - 16) {
+            n += sceClibSnprintf(buf + n, size - n, "; h2f found");
+            for (int i = 0; i < (int)sizeof(s_h2f_seen) && n < size - 3; i++)
+                n += sceClibSnprintf(buf + n, size - n, " %02X", s_h2f_seen[i]);
+        }
+        return n;
     }
     if (part == 1)
         return sceClibSnprintf(buf, size,
