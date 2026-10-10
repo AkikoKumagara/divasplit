@@ -10,11 +10,13 @@ typedef struct {
     uint32_t blit_ret;   // its return address in the final blit (3D image -> framebuffer)
     uint32_t begin_ret;  // return address of the framebuffer scene's sceGxmBeginScene
     int stage;           // the render stage that begins it (post effects + composite)
+    int bind_now;        // the engine's glBindTexture sets the GXM texture at once (f): set ours directly
     uint32_t d_gl;       // the engine's GL state "G" (seg1 offset)
     uint32_t tex_units;  // G + this: the engine's bound texture objects (SceGxmTexture at +8)
     uint32_t d_mgr;      // seg1 offset of the pointer to the render manager
-    uint32_t fbo11;      // seg0 offset of FBO 11's entry in the FBO table (+0x18/+0x1C offset in the texture)
+    uint32_t fbo11;      // seg0 offset of FBO 11's entry in the FBO table (+0x18/+0x1C offset; 0: at 0,0)
     uint32_t fbo11_size; // render manager + this: FBO 11's logical size (w, h), this frame's
+    int below;           // default: sharpen images narrower than this (f 2nd 640; f 960, its stock 640 too)
 } sharpen_game_t;
 
 // hooks the blit at game start, if the shaders are there
@@ -22,7 +24,7 @@ typedef struct {
 int sharpen_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const sharpen_game_t *g);
 void sharpen_shutdown(void);
 void sharpen_set_strength(int percent);   // 0..100
-void sharpen_set_below(int width);        // sharpen only 3D images narrower than this
+void sharpen_set_below(int width);        // sharpen only 3D images narrower than this (0: the game's default)
 void sharpen_set_enabled(int on);         // the setting (with OPT and opt.txt's sharpen)
 // main.c's sceGxmBeginScene hook, before the game's call: runs our pass when
 // it is the framebuffer scene of stage 4 (returns 1 if it did)

@@ -49,6 +49,7 @@ static uint32_t s_scene_ret, s_d_mgr;
 static volatile unsigned int d_regions;
 static SceUID s_hook = -1;
 static int s_min = 480, s_max = 720;
+static int s_req_min, s_req_max;   // opt.txt's (0: the game's default)
 static int s_level;              // 0 = s_max, each level STEP narrower
 static int s_w;                  // width this frame (0: not applied)
 static int s_applied;            // this frame used our size: its timings count
@@ -68,32 +69,34 @@ static int levels(void) {
     return (s_max - s_min + STEP - 1) / STEP;   // the last level is s_min
 }
 
-static int height_of(int w) {
-    return (w * 17 / 30 + 1) & ~1;   // 960:544 = 720:408 = 30:17, even
+static int height_of(int w) {   // the game's shape (f 2nd 30:17 = 720:408), even
+    return (w * s_game->aspect_h / s_game->aspect_w + 1) & ~1;
 }
 
-// seg0+0x25E32E(mgr), the stage-0 setup
-static void stage0_hook(uint8_t *mgr) {
+// after the game's per-frame setup wrote its size: ours (alt: the special size was asked for)
+static void apply(uint8_t *mgr, int alt) {
     const drs_game_t *g = s_game;
-    int alt = g->request ? mgr[g->request] : 0;   // the special size (f 2nd 896x512), cleared by the setup
-    TAI_CONTINUE(void, s_ref, mgr);
     s_applied = 0;
     s_w = 0;
-    if (alt || *(volatile int *)(mgr + g->mode) != 0)   // not a PV, or the special size
+    if (alt || (g->mode && *(volatile int *)(mgr + g->mode) != 0))   // not a PV, or the special size
         return;
     int bw = *(volatile int *)(mgr + g->size), bh = *(volatile int *)(mgr + g->size + 4);   // the engine's size
     int w = bw, h = bh;
     if (s_enabled && opt_cut_on(OPT_DRS)) {
         w = level_w(s_level);
         h = height_of(w);
+        if (h > g->max_h) {   // the render targets' height
+            h = g->max_h & ~1;
+            w = h * g->aspect_w / g->aspect_h;
+        }
         s_applied = 1;
     }
-    if (w < 16 || h < 16 || w > 1024 || h > 544)
+    if (w < 16 || h < 16 || w > 1024 || h > g->max_h)
         return;
     volatile int *p = (volatile int *)(mgr + g->size);
     p[0] = w;
     p[1] = h;
-    for (int k = 0; k < 3; k++) {   // 3D world, tonemap output, stage-2 background
+    for (int k = 0; g->fbo_size && k < 3; k++) {   // 3D world, tonemap output, stage-2 background
         p = (volatile int *)(mgr + g->fbo_size + 8 * g->fbo[k]);
         p[0] = w;
         p[1] = h;
@@ -105,6 +108,28 @@ static void stage0_hook(uint8_t *mgr) {
         if ((unsigned)w > d_maxw)
             d_maxw = (unsigned)w;
     }
+}
+
+// f 2nd: seg0+0x25E32E(mgr), the stage-0 setup
+static void stage0_hook(uint8_t *mgr) {
+    int alt = s_game->request ? mgr[s_game->request] : 0;   // the special size, cleared by the setup
+    TAI_CONTINUE(void, s_ref, mgr);
+    apply(mgr, alt);
+}
+
+// f: the setup (0x2828BE) runs in RenderStage(5) and VitaGrafix's IB patch is
+// inside it, so main.c calls this before and after that stage instead of a hook
+void drs_stage(int stage, int after) {
+    static int alt;
+    if (!s_game || s_game->stage0 || stage != s_game->stage)
+        return;
+    uint8_t *mgr = *(uint8_t *const volatile *)(s_seg1 + s_d_mgr);
+    if (!mgr)
+        return;
+    if (!after)
+        alt = s_game->request ? mgr[s_game->request] : 0;
+    else
+        apply(mgr, alt);
 }
 
 void drs_frame(unsigned int frame_us, unsigned int gpu_us, unsigned int vs_us) {
@@ -153,17 +178,27 @@ void drs_set_enabled(int on) {
     s_enabled = on;
 }
 
-void drs_set_range(int min_w, int max_w) {
+// defaults: stock width at the top, two thirds of it at the bottom (f 2nd 480..720, f 448..640)
+static void resolve_range(void) {
+    int stock = s_game ? s_game->stock_w : 720, cap = s_game ? s_game->max_w : 960;
+    int min_w = s_req_min > 0 ? s_req_min : (stock * 2 / 3 + 31) & ~31;
+    int max_w = s_req_max > 0 ? s_req_max : stock;
     if (min_w < 320)
         min_w = 320;
-    if (max_w > 960)
-        max_w = 960;
+    if (max_w > cap)
+        max_w = cap;
     if (max_w < min_w)
         max_w = min_w;
     s_min = min_w;
     s_max = max_w;
     if (s_level > levels())
         s_level = levels();
+}
+
+void drs_set_range(int min_w, int max_w) {
+    s_req_min = min_w;
+    s_req_max = max_w;
+    resolve_range();
 }
 
 int drs_width(void) {
@@ -178,13 +213,14 @@ int drs_scene_region(uint32_t ret_addr, const void *color, unsigned int *xmax, u
         return 0;
     const drs_game_t *g = s_game;
     int off = (int)((const uint8_t *)color - g->color - (mgr + g->scene));
-    if (off < 0 || (off & 0x7F) != 0)
+    if (off < 0 || off % (int)g->stride != 0)
         return 0;
-    int i = off >> 7;
+    int i = off / (int)g->stride;
     if (i != g->fbo[0] && i != g->fbo[1] && i != g->fbo[2])
         return 0;
-    int w = *(const volatile int *)(mgr + g->fbo_size + 8 * i), h = *(const volatile int *)(mgr + g->fbo_size + 4 + 8 * i);
-    if (w < 16 || h < 16 || w >= 1024 || h >= 544)
+    uint32_t so = g->fbo_size ? g->fbo_size + 8 * i : g->size;   // f: one size for all three
+    int w = *(const volatile int *)(mgr + so), h = *(const volatile int *)(mgr + so + 4);
+    if (w < 16 || h < 16 || w >= 1024 || h >= g->max_h)
         return 0;   // the whole texture anyway
     *xmax = (unsigned int)w;   // inclusive: the image and one texel past it
     *ymax = (unsigned int)h;
@@ -197,6 +233,9 @@ int drs_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const drs_game_t *g) 
     s_seg1 = seg1;
     s_scene_ret = (uint32_t)(seg0 + g->scene_ret) | 1;
     s_d_mgr = g->d_mgr;
+    resolve_range();
+    if (!g->stage0)
+        return 0;   // driven from main.c's RenderStage hook (drs_stage)
     s_hook = taiHookFunctionOffset(&s_ref, modid, 0, g->stage0, 1, stage0_hook);
     return s_hook;
 }

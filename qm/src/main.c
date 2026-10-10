@@ -38,8 +38,8 @@ static const char *const ROW_TEXT[ROW_COUNT] = {ID("txt_avs"), ID("txt_sync"), I
 static const char *const ROW_BOX[ROW_COUNT] = {ID("cb_avs"), ID("cb_sync"), ID("cb_opt"), ID("cb_drs"),
         ID("cb_sharp"), ID("cb_bar"), ID("cb_rec")};
 static const char *const ROW_LABEL[ROW_COUNT] = {
-    "Adaptive vsync (AVS)", "Frame-drop catch-up (SYNC)", "Engine optimizations", "Dynamic resolution (f 2nd)",
-    "Sharpen low-res 3D (f 2nd)", "Status bar", "Record to log.csv"};
+    "Adaptive vsync (AVS)", "Frame-drop catch-up (SYNC)", "Engine optimizations", "Dynamic resolution (f, f 2nd)",
+    "Sharpen low-res 3D (f, f 2nd)", "Status bar", "Record to log.csv"};
 
 static int *row_field(game_settings_t *gs, int row) {
     switch (row) {

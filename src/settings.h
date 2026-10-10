@@ -45,7 +45,7 @@ static const preset_t PRESETS[] = {
 
 typedef struct {
     int preset, sync, avs, bar, rec, opt;
-    int drs, sharp;   // dynamic resolution, sharpening of the 3D image (f 2nd)
+    int drs, sharp;   // dynamic resolution, sharpening of the 3D image (f, f 2nd)
 } game_settings_t;
 
 typedef struct {
@@ -64,7 +64,7 @@ static inline void settings_defaults(settings_t *s) {
         // the engine optimizations exist for f 2nd only (opt.c)
         s->game[i].opt = sceClibStrncmp(SETTINGS_GAME_TAG[i], "F2ND", 5) == 0;
         s->game[i].drs = 0;     // lowers the resolution: asked for, not by default
-        s->game[i].sharp = 1;   // only acts below 640 wide (drs, or VitaGrafix IB)
+        s->game[i].sharp = 1;   // f 2nd: only below 640 wide (drs, or VitaGrafix IB); f: whenever stretched
     }
 }
 

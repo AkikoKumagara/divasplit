@@ -240,14 +240,24 @@ static const sharpen_game_t F2ND_SHARPEN = {.blit = 0x25E208, .blit_ret = 0x2612
 
 // the render manager's per-frame setup, which writes the 3D size (drs.c)
 static const drs_game_t F2ND_DRS = {.stage0 = 0x25E32E, .scene_ret = 0x266588, .d_mgr = 0x447808,
-        .size = 0x38, .mode = 0x2C, .request = 0x34, .fbo_size = 0x18F4, .scene = 0x1074, .color = 0x24,
-        .fbo = {0, 11, 12}};
+        .size = 0x38, .mode = 0x2C, .request = 0x34, .fbo_size = 0x18F4, .scene = 0x1074, .stride = 0x80,
+        .color = 0x24, .fbo = {0, 11, 12}, .max_h = 544, .aspect_w = 30, .aspect_h = 17, .stock_w = 720,
+        .max_w = 960};
+// f: the setup 0x2828BE runs in RenderStage(5) (VitaGrafix patches inside it: no hook there);
+// one size for all passes, 640x352 stock (20:11), 1024x512 targets; FBO 0 3D, 4 tonemap, 5 stage 2
+static const drs_game_t F_DRS = {.stage = 5, .scene_ret = 0x28D364, .d_mgr = 0x26FB6C,
+        .size = 0x30, .request = 0x2C, .scene = 0x304, .stride = 0x74, .color = 0x24, .fbo = {0, 4, 5},
+        .max_h = 512, .aspect_w = 20, .aspect_h = 11, .stock_w = 640, .max_w = 896};   // 896x492 (engine's own top 896x512)
+// f's final blit (0x283B48, stage 10): quad 0x28260C called at 0x283CCE; FB scene begin 0x3D95BE
+static const sharpen_game_t F_SHARPEN = {.blit = 0x28260C, .blit_ret = 0x283CD2, .begin_ret = 0x3D95F2,
+        .stage = 10, .bind_now = 1, .d_gl = 0x2FC6B8, .tex_units = 0x1225DC, .d_mgr = 0x26FB6C,
+        .fbo11_size = 0x30, .below = 960};
 
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
     {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0, {0}, NULL},
     // f: FM 0x816E7228, stage table 0x818F8B58 (seg1 0x81689000)
-    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}, &F_CUTS},
+    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}, &F_CUTS, &F_SHARPEN, &F_DRS},
     // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
     // uniform reuse off (see opt.c); f 2nd's offsets: {0x4DE90A, 0x4DE8B8, 0x4DE8EA}
     {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS, &F2ND_SHARPEN, &F2ND_DRS},
@@ -595,7 +605,11 @@ static int render_stage_hook(int stage) {
 
     uint64_t w0 = g_gpu_total;
     g_cur_stage = stage;
+    if (g_game->drs)   // f: dynamic resolution around the stage that sets the 3D size
+        drs_stage(stage, 0);
     int ret = TAI_CONTINUE(int, g_ref[HOOK_STAGE], stage);
+    if (g_game->drs)
+        drs_stage(stage, 1);
     g_cur_stage = -1;
     if (tr0)
         trace_add(TR_STAGE, tr0, trace_now(), (uint32_t)stage, 0);
@@ -821,13 +835,13 @@ static void opt_file_load(void) {
                     ab |= KEYS[k].bit;
             }
         }
-        int v, lo = 480, hi = 720;
+        int v, lo = 0, hi = 0;   // 0: the game's defaults
         if (len > 0) {   // dynamic resolution: the range of widths
             settings_get_int(buf, buf + len, "drs_min", &lo);
             settings_get_int(buf, buf + len, "drs_max", &hi);
         }
         drs_set_range(lo, hi);
-        int below = 640;
+        int below = 0;
         if (len > 0)
             settings_get_int(buf, buf + len, "sharpen_below", &below);
         sharpen_set_below(below);

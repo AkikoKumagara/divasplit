@@ -6,17 +6,21 @@
 
 // dynamic resolution of the 3D world (drs.c)
 typedef struct {
-    uint32_t stage0;     // render manager's per-frame setup (mgr): writes the 3D size
+    uint32_t stage0;     // render manager's per-frame setup (mgr): writes the 3D size (0: see stage)
+    int stage;           // or: the render stage that runs that setup (f: VitaGrafix patches the setup itself)
     uint32_t scene_ret;  // return address of the FBO scene begin's sceGxmBeginScene
     uint32_t d_mgr;      // seg1 offset of the pointer to the render manager
     // render manager offsets
     uint32_t size;       // the internal resolution (w, h), written every frame by stage0
-    uint32_t mode;       // 0 = PV
+    uint32_t mode;       // its value 0 = PV (0: no such field, f)
     uint32_t request;    // byte: the special size this frame (0: none)
-    uint32_t fbo_size;   // logical sizes of the FBOs (w, h), 8 bytes each
-    uint32_t scene;      // FBO scene objects, 0x80 bytes each; colour surface at +color
-    uint32_t color;
+    uint32_t fbo_size;   // logical sizes of the FBOs (w, h), 8 bytes each (0: they all use size, f)
+    uint32_t scene;      // FBO scene objects, stride bytes each; colour surface at +color
+    uint32_t stride, color;
     uint8_t fbo[3];      // the FBOs that follow the internal resolution (3D world, tonemap, stage 2)
+    int max_h;           // the render targets' height (f 2nd 544, f 512)
+    int aspect_w, aspect_h;   // the internal resolution's shape (f 2nd 30:17, f 20:11)
+    int stock_w, max_w;  // the engine's width in a PV (the default range's top) and the widest allowed
 } drs_game_t;
 
 int drs_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const drs_game_t *g);   // hooks at game start
@@ -25,7 +29,8 @@ int drs_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const drs_game_t *g);
 // 1024x544). Returns 1 with *xmax / *ymax set when it applies.
 int drs_scene_region(uint32_t ret_addr, const void *color, unsigned int *xmax, unsigned int *ymax);
 void drs_shutdown(void);
-void drs_set_range(int min_w, int max_w);          // widths; heights keep 960:544
+void drs_stage(int stage, int after);   // main.c, around RenderStage (for games with drs_game_t.stage)
+void drs_set_range(int min_w, int max_w);          // widths (0: the game's default); heights keep its shape
 void drs_set_enabled(int on);                      // the setting (with OPT and opt.txt's drs)
 // once per frame (main thread): last frame's time, its GPU and vblank waits (us)
 void drs_frame(unsigned int frame_us, unsigned int gpu_us, unsigned int vs_us);

@@ -70,6 +70,7 @@ static uintptr_t s_seg0, s_seg1;
 static uint32_t s_blit_ret, s_begin_ret;
 static float s_amount = 1.5f, s_over = 0.25f;
 static int s_below = 640;       // sharpen only images narrower than this (a mild stretch doesn't need it)
+static int s_req_below;         // opt.txt's (0: the game's default)
 static volatile int s_enabled = 1;   // the setting
 static tai_hook_ref_t s_ref;
 static SceUID s_hook = -1;
@@ -348,10 +349,14 @@ static int pass(SceGxmContext *ctx) {
     const uint8_t *mgr = *(const uint8_t *const volatile *)(s_seg1 + s_game->d_mgr);
     if (!mgr)
         return why(W_AREA, 0);
-    const volatile int *ent = (const volatile int *)(s_seg0 + s_game->fbo11);
     const volatile int *sz = (const volatile int *)(mgr + s_game->fbo11_size);
     float tw = (float)s_tw, th = (float)s_th;
-    int x0 = ent[0x18 / 4], y0 = ent[0x1C / 4];
+    int x0 = 0, y0 = 0;
+    if (s_game->fbo11) {
+        const volatile int *ent = (const volatile int *)(s_seg0 + s_game->fbo11);
+        x0 = ent[0x18 / 4];
+        y0 = ent[0x1C / 4];
+    }
     int x1 = x0 + sz[0], y1 = y0 + sz[1];
     if (x1 - x0 >= 959 || x1 - x0 >= s_below) {   // 1:1 (menus) or a mild stretch: left alone
         d_one++;
@@ -433,11 +438,21 @@ static void blit_hook(void *mgr, const float *uv, const float *col, float z) {
         next(mgr, uv, col, z);
         return;
     }
-    // the engine binds obj+8 during the call: our copy, then its own again
-    SceGxmTexture *t = (SceGxmTexture *)(obj + 8), saved = *t;
-    *t = s_out;
-    next(mgr, uv, col, z);
-    *t = saved;
+    SceGxmTexture *t = (SceGxmTexture *)(obj + 8);
+    if (s_game->bind_now) {
+        // f: glBindTexture already gave GXM the engine's texture: ours for the
+        // blit's draw, then the engine's again, as the engine believes it is
+        SceGxmContext *ctx = *(SceGxmContext *const volatile *)(s_g + 0x3C);
+        sceGxmSetFragmentTexture(ctx, 0, &s_out);
+        next(mgr, uv, col, z);
+        sceGxmSetFragmentTexture(ctx, 0, t);
+    } else {
+        // f 2nd: the engine binds obj+8 during the call: our copy, then its own again
+        SceGxmTexture saved = *t;
+        *t = s_out;
+        next(mgr, uv, col, z);
+        *t = saved;
+    }
     d_swaps++;
 }
 
@@ -450,6 +465,7 @@ int sharpen_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const sharpen_gam
     if (s_state != 1)
         return s_state;
     s_game = g;
+    sharpen_set_below(s_req_below);
     s_g = (uint8_t *)(seg1 + g->d_gl);
     s_seg0 = seg0;
     s_seg1 = seg1;
@@ -496,6 +512,9 @@ void sharpen_set_enabled(int on) {
 }
 
 void sharpen_set_below(int width) {
+    s_req_below = width;
+    if (width <= 0)
+        width = s_game && s_game->below ? s_game->below : 640;
     s_below = width < 16 ? 16 : width > 960 ? 960 : width;
 }
 
