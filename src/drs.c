@@ -43,6 +43,7 @@
 #define GPU_FREE_US 800      // a step up: a second averaging less GPU wait than this
 
 static tai_hook_ref_t s_ref;
+static const drs_game_t *s_game;
 static uintptr_t s_seg1;
 static uint32_t s_scene_ret, s_d_mgr;
 static volatile unsigned int d_regions;
@@ -73,13 +74,14 @@ static int height_of(int w) {
 
 // seg0+0x25E32E(mgr), the stage-0 setup
 static void stage0_hook(uint8_t *mgr) {
-    int alt = mgr[0x34];   // the 896x512 request, cleared by the setup
+    const drs_game_t *g = s_game;
+    int alt = g->request ? mgr[g->request] : 0;   // the special size (f 2nd 896x512), cleared by the setup
     TAI_CONTINUE(void, s_ref, mgr);
     s_applied = 0;
     s_w = 0;
-    if (alt || *(volatile int *)(mgr + 0x2C) != 0)   // not a PV, or the special size
+    if (alt || *(volatile int *)(mgr + g->mode) != 0)   // not a PV, or the special size
         return;
-    int bw = *(volatile int *)(mgr + 0x38), bh = *(volatile int *)(mgr + 0x3C);   // the engine's size
+    int bw = *(volatile int *)(mgr + g->size), bh = *(volatile int *)(mgr + g->size + 4);   // the engine's size
     int w = bw, h = bh;
     if (s_enabled && opt_cut_on(OPT_DRS)) {
         w = level_w(s_level);
@@ -88,15 +90,14 @@ static void stage0_hook(uint8_t *mgr) {
     }
     if (w < 16 || h < 16 || w > 1024 || h > 544)
         return;
-    volatile int *p = (volatile int *)mgr;
-    p[0x38 / 4] = w;
-    p[0x3C / 4] = h;
-    p[0x18F4 / 4] = w;   // FBO 0
-    p[0x18F8 / 4] = h;
-    p[0x194C / 4] = w;   // FBO 11
-    p[0x1950 / 4] = h;
-    p[0x1954 / 4] = w;   // FBO 12
-    p[0x1958 / 4] = h;
+    volatile int *p = (volatile int *)(mgr + g->size);
+    p[0] = w;
+    p[1] = h;
+    for (int k = 0; k < 3; k++) {   // 3D world, tonemap output, stage-2 background
+        p = (volatile int *)(mgr + g->fbo_size + 8 * g->fbo[k]);
+        p[0] = w;
+        p[1] = h;
+    }
     s_w = w;
     if (s_applied) {
         if ((unsigned)w < d_minw)
@@ -175,13 +176,14 @@ int drs_scene_region(uint32_t ret_addr, const void *color, unsigned int *xmax, u
     const uint8_t *mgr = *(const uint8_t *const volatile *)(s_seg1 + s_d_mgr);
     if (!mgr)
         return 0;
-    int off = (int)((const uint8_t *)color - 0x24 - (mgr + 0x1074));
+    const drs_game_t *g = s_game;
+    int off = (int)((const uint8_t *)color - g->color - (mgr + g->scene));
     if (off < 0 || (off & 0x7F) != 0)
         return 0;
     int i = off >> 7;
-    if (i != 0 && i != 11 && i != 12)
+    if (i != g->fbo[0] && i != g->fbo[1] && i != g->fbo[2])
         return 0;
-    int w = *(const volatile int *)(mgr + 0x18F4 + 8 * i), h = *(const volatile int *)(mgr + 0x18F8 + 8 * i);
+    int w = *(const volatile int *)(mgr + g->fbo_size + 8 * i), h = *(const volatile int *)(mgr + g->fbo_size + 4 + 8 * i);
     if (w < 16 || h < 16 || w >= 1024 || h >= 544)
         return 0;   // the whole texture anyway
     *xmax = (unsigned int)w;   // inclusive: the image and one texel past it
@@ -191,6 +193,7 @@ int drs_scene_region(uint32_t ret_addr, const void *color, unsigned int *xmax, u
 }
 
 int drs_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const drs_game_t *g) {
+    s_game = g;
     s_seg1 = seg1;
     s_scene_ret = (uint32_t)(seg0 + g->scene_ret) | 1;
     s_d_mgr = g->d_mgr;

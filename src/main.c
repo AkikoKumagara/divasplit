@@ -235,11 +235,13 @@ static const opt_cuts_t F_CUTS = {
 
 // the final blit of the 3D image and the framebuffer scene's begin (sharpen.c); the GL
 // state and its bound texture units
-static const sharpen_game_t F2ND_SHARPEN = {.blit = 0x25E208, .blit_ret = 0x26124A, .begin_ret = 0x4E0802,
+static const sharpen_game_t F2ND_SHARPEN = {.blit = 0x25E208, .blit_ret = 0x26124A, .begin_ret = 0x4E0802, .stage = 4,
         .d_gl = 0x6032A8, .tex_units = 0x1217C4, .d_mgr = 0x447808, .fbo11 = 0x6B3164, .fbo11_size = 0x194C};
 
 // the render manager's per-frame setup, which writes the 3D size (drs.c)
-static const drs_game_t F2ND_DRS = {.stage0 = 0x25E32E, .scene_ret = 0x266588, .d_mgr = 0x447808};
+static const drs_game_t F2ND_DRS = {.stage0 = 0x25E32E, .scene_ret = 0x266588, .d_mgr = 0x447808,
+        .size = 0x38, .mode = 0x2C, .request = 0x34, .fbo_size = 0x18F4, .scene = 0x1074, .color = 0x24,
+        .fbo = {0, 11, 12}};
 
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)

@@ -398,7 +398,7 @@ static int pass(SceGxmContext *ctx) {
 }
 
 int sharpen_before_scene(void *ctx, uint32_t ret_addr, int stage) {
-    if (ret_addr != s_begin_ret || stage != 4 || s_state < 1 || !s_src || s_amount <= 0.0f || !s_enabled
+    if (ret_addr != s_begin_ret || stage != s_game->stage || s_state < 1 || !s_src || s_amount <= 0.0f || !s_enabled
             || !opt_cut_on(OPT_SHARPEN))
         return 0;
     if (s_state == 1) {   // first time: the GPU side, once

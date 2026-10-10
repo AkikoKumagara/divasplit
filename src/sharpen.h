@@ -9,6 +9,7 @@ typedef struct {
     uint32_t blit;       // the engine's textured quad (mgr, uv[4], colour, z in s0)
     uint32_t blit_ret;   // its return address in the final blit (3D image -> framebuffer)
     uint32_t begin_ret;  // return address of the framebuffer scene's sceGxmBeginScene
+    int stage;           // the render stage that begins it (post effects + composite)
     uint32_t d_gl;       // the engine's GL state "G" (seg1 offset)
     uint32_t tex_units;  // G + this: the engine's bound texture objects (SceGxmTexture at +8)
     uint32_t d_mgr;      // seg1 offset of the pointer to the render manager

@@ -9,6 +9,14 @@ typedef struct {
     uint32_t stage0;     // render manager's per-frame setup (mgr): writes the 3D size
     uint32_t scene_ret;  // return address of the FBO scene begin's sceGxmBeginScene
     uint32_t d_mgr;      // seg1 offset of the pointer to the render manager
+    // render manager offsets
+    uint32_t size;       // the internal resolution (w, h), written every frame by stage0
+    uint32_t mode;       // 0 = PV
+    uint32_t request;    // byte: the special size this frame (0: none)
+    uint32_t fbo_size;   // logical sizes of the FBOs (w, h), 8 bytes each
+    uint32_t scene;      // FBO scene objects, 0x80 bytes each; colour surface at +color
+    uint32_t color;
+    uint8_t fbo[3];      // the FBOs that follow the internal resolution (3D world, tonemap, stage 2)
 } drs_game_t;
 
 int drs_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const drs_game_t *g);   // hooks at game start
