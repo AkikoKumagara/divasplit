@@ -3,6 +3,7 @@
 per-function profile of the game's main thread.
 
     python3 profview.py prof.bin eboot.bin.elf [--heavy-ms 18] [--top 25] [--stage 3]
+    python3 profview.py prof.bin eboot.bin.elf --ab log.csv [--rec N]
 
 eboot.bin.elf is the decrypted eboot of the same game version. Function
 boundaries come from its unwind table (.ARM.exidx), so every sample maps to the
@@ -14,6 +15,8 @@ Reports, in ms of main thread time per frame:
   - self time per function (where the CPU was)
   - inclusive time per function (any sample with that function on the stack)
   - light vs heavy frames: which functions grow when the frame rate drops
+    (with --ab: OPT off vs on windows of an A/B recording instead, matched by
+    the frame column of log.csv)
 """
 import argparse
 import bisect
@@ -155,6 +158,30 @@ def load(path):
     return dict(rate=rate, nid=nid, text_base=text_base, text_size=text_size, threads=names), samples
 
 
+def ab_frames(log, rec):
+    """Frames of the OPT off and on windows of an A/B recording, from log.csv's
+    opt and frame columns (frame = the next window's first frame)."""
+    import csv
+    recs, cur = [], None
+    for row in csv.reader(open(log)):
+        if not row or row[0].startswith('#'):
+            continue
+        if row[0] == 't':
+            cur = (row, [])
+            recs.append(cur)
+        elif cur:
+            cur[1].append(dict(zip(cur[0], row)))
+    recs = [r for r in recs if 'frame' in r[0]]
+    if not recs:
+        sys.exit(f'{log}: no recording with a frame column (needs divasplit with per-stage columns)')
+    rows = recs[rec][1]
+    off, on = set(), set()
+    for a, b in zip(rows, rows[1:]):   # window b: frames [a.frame, b.frame)
+        if a.get('frame') and b.get('frame'):
+            (on if b['opt'] == '1' else off).update(range(int(a['frame']), int(b['frame'])))
+    return off, on
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('prof')
@@ -163,6 +190,8 @@ def main():
     ap.add_argument('--top', type=int, default=25)
     ap.add_argument('--stage', type=int, help='only samples taken in this render stage')
     ap.add_argument('--thread', default='0', help='thread to report on: index or name (default 0, the main thread)')
+    ap.add_argument('--ab', metavar='LOG', help='compare OPT off / on windows of this A/B log.csv instead of light / heavy')
+    ap.add_argument('--rec', type=int, default=-1, help='with --ab: which recording in log.csv (default -1, the last)')
     args = ap.parse_args()
 
     hdr, all_samples = load(args.prof)
@@ -191,6 +220,12 @@ def main():
             frame_ms[a] = (first_t[b] - first_t[a]) / 1000.0
     heavy = {f for f, ms in frame_ms.items() if ms > args.heavy_ms}
     light = {f for f, ms in frame_ms.items() if ms <= args.heavy_ms}
+    L1, L2, GROWTH = 'light', 'heavy', 'growth'
+    if args.ab:
+        off, on = ab_frames(args.ab, args.rec)
+        light = {f for f in frame_ms if f in off}
+        heavy = {f for f in frame_ms if f in on}
+        L1, L2, GROWTH = 'off', 'on', 'on-off'
 
     def where(s):
         t, frame, stage, flags, n, pc, lr, sp, cpsr, kpc, kcpsr, cost, stack, _, _ = s
@@ -268,16 +303,20 @@ def main():
         print(f'reporting on thread {thread} ({names[thread]})\n')
     print(f'{len(samples)} samples, one per {period_ms:.2f} ms (nominal {hdr["rate"]} Hz), {total} in complete frames'
           + (f' of stage {args.stage}' if args.stage is not None else ''))
-    print(f'frames: {len(frame_ms)}, light {len(light)} (avg {avg(light):.1f} ms), '
-          f'heavy > {args.heavy_ms:g} ms {len(heavy)} (avg {avg(heavy):.1f} ms)')
+    if args.ab:
+        print(f'frames: {len(frame_ms)}, OPT off {len(light)} (avg {avg(light):.1f} ms), '
+              f'OPT on {len(heavy)} (avg {avg(heavy):.1f} ms)')
+    else:
+        print(f'frames: {len(frame_ms)}, light {len(light)} (avg {avg(light):.1f} ms), '
+              f'heavy > {args.heavy_ms:g} ms {len(heavy)} (avg {avg(heavy):.1f} ms)')
     pauses = [x[11] for x in all_samples if x[13] == 0]
     if pauses:
         print(f'profiler pause per sample: avg {sum(pauses) / len(pauses):.0f} us, max {max(pauses)} us')
 
     print('\nmain thread ms per frame by render stage (-1 = outside RenderStage: update, swap)')
     print('  game = eboot code, lib = system libraries (GPU API, libc), wait = blocked or in the kernel')
-    print(f'  {"stage":>6} | {"light game":>10} {"lib":>5} {"wait":>5} | {"heavy game":>10} {"lib":>5} {"wait":>5} |'
-          f' {"growth game+lib":>15}')
+    print(f'  {"stage":>6} | {L1 + " game":>10} {"lib":>5} {"wait":>5} | {L2 + " game":>10} {"lib":>5} {"wait":>5} |'
+          f' {GROWTH + " game+lib":>15}')
     for st in sorted(stage_c['all']):
         v = {(g, k): ms(g, kind_c[g][(st, k)]) for g in ('light', 'heavy') for k in ('game', 'lib', 'wait')}
         if sum(v.values()) < 0.05:
@@ -288,7 +327,7 @@ def main():
 
     def table(title, counters, key=None):
         print(f'\n{title}')
-        print(f'  {"light":>7} {"heavy":>7} {"growth":>7}  function')
+        print(f'  {L1:>7} {L2:>7} {GROWTH:>7}  function')
         rows = []
         for f in counters['all']:
             lt, hv = ms('light', counters['light'][f]), ms('heavy', counters['heavy'][f])
@@ -304,7 +343,8 @@ def main():
         table('time in the kernel (ms per frame), by the system call the game made', waits)
     table('self time (ms per frame): where the CPU was', self_c)
     table('inclusive CPU time (ms per frame): function on the stack', incl_c)
-    table('growth in heavy frames (inclusive, ms per frame)', incl_c, key=lambda r: -(r[1] - r[0]))
+    table(f'{GROWTH} (inclusive, ms per frame), largest increase first', incl_c, key=lambda r: -(r[1] - r[0]))
+    table(f'{GROWTH} (inclusive, ms per frame), largest decrease first', incl_c, key=lambda r: r[1] - r[0])
     if lib_callers:
         print('\nsystem library time, by the eboot function that called it (samples)')
         for f, n in lib_callers.most_common(10):

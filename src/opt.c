@@ -84,6 +84,8 @@ static tai_hook_ref_t s_matmul_ref;
 static SceUID s_matmul_hook = -1;
 static volatile int *s_on;
 static volatile unsigned int s_mask = OPT_DEFAULT;
+static volatile unsigned int s_abmask;   // cuts A/B compares (0: all of them)
+static volatile const int *s_mode;       // main.c's OPT setting: 0 off, 1 on, 2 A/B
 static int s_r2_reuse;                    // round 2 uniform reuse installed: the probe below must stay out
 static uint32_t s_ur_scene = 1;            // scene count (round 2 uniform reuse)
 static int s_scenes_tracked;               // main.c hooks Begin/EndScene: probe_scene() runs
@@ -318,8 +320,12 @@ static int s_sort0_cleared;       // we switched the list 0 sort off
 static volatile uint32_t d_centre_calls, d_centre_bones, d_sorts, d_sort_big, d_dirty_fast;
 static volatile uint32_t d_check_n, d_check_abs, d_check_rel;   // largest differences, x1e6
 
+// with OPT on every cut in the mask; in an A/B "off" window only the cuts that
+// aren't being compared (opt.txt value 1 while others have 2) stay on
 static inline int cut_on(unsigned int bit) {
-    return *s_on && (s_mask & bit);
+    if (!(s_mask & bit))
+        return 0;
+    return *s_on || (s_abmask && !(s_abmask & bit) && s_mode && *s_mode == 2);
 }
 
 // the original's arguments: obj+0x10 bone count (signed), *obj the sub mesh with
@@ -1276,6 +1282,14 @@ void opt_set_scenes_tracked(int ok) {
 
 void opt_set_mask(unsigned int mask) {
     s_mask = mask;
+}
+
+void opt_set_abmask(unsigned int mask) {
+    s_abmask = mask;
+}
+
+void opt_set_mode_ptr(volatile const int *mode) {
+    s_mode = mode;
 }
 
 unsigned int opt_mask(void) {

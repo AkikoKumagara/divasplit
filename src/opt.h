@@ -69,6 +69,8 @@ int opt_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, uint32_t matmul_off,
         const opt_cuts_t *cuts, volatile int *on);
 void opt_shutdown(void);
 void opt_set_mask(unsigned int mask);
+void opt_set_abmask(unsigned int mask);   // cuts the A/B compares; the others stay on (0: all)
+void opt_set_mode_ptr(volatile const int *mode);   // the OPT setting (2 = A/B)
 unsigned int opt_mask(void);
 void opt_frame(void);                 // main thread, frame start: applies patches / switches
 int opt_diag(char *buf, int size);    // cumulative counters, for diag.txt

@@ -370,6 +370,8 @@ static void log_line(uint64_t now) {
     }
     for (int k = 0; k < LOG_STAGES && n < LOG_LINE - 16; k++)
         n += sceClibSnprintf(line + n, LOG_LINE - n, ",%d.%d", MS(g_perf.st10[k]));
+    if (n < LOG_LINE - 16)   // the next window's first frame (the profiler's frame numbers)
+        n += sceClibSnprintf(line + n, LOG_LINE - n, ",%u", g_frame);
     line[n++] = '\n';
     g_log_len[head % LOG_SLOTS] = n;
     __sync_synchronize();
@@ -385,7 +387,7 @@ static void log_flush(void) {
                 "t,game,preset,sync,avs,opt,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap,"
                 "main_run,main_ready,main_wait,core0,core1,core2,core3,"
                 "up_copies,up_bytes,up_blocks,up_block_bytes,up_reused,up_reused_bytes,up_setdata,up_overflow,"
-                "st0,st1,st2,st3,st4,st5,st6,st7\n";
+                "st0,st1,st2,st3,st4,st5,st6,st7,frame\n";
             sceIoWrite(g_log_fd, hdr, sizeof(hdr) - 1);
         }
     }
@@ -686,7 +688,7 @@ static void opt_file_load(void) {
             {"texwrap", OPT_TEXWRAP}, {"keyset", OPT_KEYSET}, {"h2f", OPT_H2F}, {"nolog", OPT_NOLOG},
             {"earlykick", OPT_EARLYKICK}, {"ucopy", OPT_UCOPY}, {"ekcheck", OPT_EKCHECK}};
     static char buf[1024];   // the input thread, after module_start
-    unsigned int mask = OPT_DEFAULT;
+    unsigned int mask = OPT_DEFAULT, ab = 0;
     SceUID fd = sceIoOpen(OPT_FILE, SCE_O_RDONLY, 0);
     if (fd >= 0) {
         int len = sceIoRead(fd, buf, sizeof(buf) - 1);
@@ -707,13 +709,19 @@ static void opt_file_load(void) {
         }
         for (unsigned int k = 0; len > 0 && k < sizeof(KEYS) / sizeof(KEYS[0]); k++) {
             int v;
-            if (settings_get_int(buf, buf + len, KEYS[k].key, &v))
+            if (settings_get_int(buf, buf + len, KEYS[k].key, &v)) {
                 mask = v ? mask | KEYS[k].bit : mask & ~KEYS[k].bit;
+                if (v == 2)   // on, and the one A/B compares (the others stay on)
+                    ab |= KEYS[k].bit;
+            }
         }
     }
-    if (mask != opt_mask()) {
+    static unsigned int last_ab;
+    if (mask != opt_mask() || ab != last_ab) {
         opt_set_mask(mask);
-        diag("opt mask %X (opt.txt)", mask);
+        opt_set_abmask(ab);
+        last_ab = ab;
+        diag("opt mask %X, A/B compares %X (opt.txt)", mask, ab ? ab : mask);
     }
 }
 
@@ -920,6 +928,7 @@ int module_start(SceSize argc, const void *args) {
     opt_set_scenes_tracked(g_hook[HOOK_BEGIN] >= 0 && g_hook[HOOK_END] >= 0);
     int opt = opt_init(info.modid, g_text_base, g_seg1, g_game->opt_matmul, g_game->cuts, &g_opt_on);
     opt_set_stage_ptr(&g_cur_stage);
+    opt_set_mode_ptr(&g_opt);
     {
         char line[256];
         opt_diag(line, sizeof(line));
