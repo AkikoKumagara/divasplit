@@ -205,6 +205,20 @@ Follow-ups (2026-10-10):
   `__tls_get_addr` called straight from the eboot is ~0.1 ms per frame (not
   worth a cache).
 
+OPT A/B on the same heavy PV in four setups (2026-10-10, ~200 paired seconds
+each; fps mean, main-thread cpu and GPU wait in ms per frame):
+
+| Clocks | AVS | fps off → on | cpu off → on | GPU wait off → on |
+|---|---|---|---|---|
+| overclocked | off | 51.3 → 55.9 | 14.9 → 13.3 | 0.5 → 0.7 |
+| overclocked | on | 56.1 → 57.0 | 16.7 → 14.1 | 1.1 → 2.4 |
+| stock | off | 29.9 → 33.5 | 21.6 → 17.6 | 0.6 → 0.7 |
+| stock | on | 44.0 → 47.1 | 21.2 → 17.0 | 1.6 → 4.2 |
+
+At stock clocks the cuts save 4 ms of CPU per frame (1.6 overclocked). With
+AVS on, OPT moves the limit to the GPU in both clock settings: the CPU time
+saved turns into GPU wait. Without AVS, frames over 16.7 ms still fall to 30.
+
 Stage 3 is not the only thing that grows in heavy frames: PVGAME ctrl
 (`0x5F1B40`) grows 0.23 → 0.48 ms, in the PV script `0x3256EC` → `0x325374` →
 `0x31B346`, which runs before the ROB_BASE kick.
