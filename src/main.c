@@ -765,7 +765,7 @@ static void settings_apply(const game_settings_t *gs) {
     g_opt = gs->opt >= 0 && gs->opt <= 2 ? gs->opt : 0;
     g_drs = gs->drs != 0;
     g_sharp = gs->sharp != 0;
-    g_style = gs->style != 0;
+    g_style = gs->style >= 0 && gs->style <= 2 ? gs->style : 0;
     drs_set_enabled(g_drs);
     sharpen_set_enabled(g_sharp);
     sharpen_set_style(g_style);

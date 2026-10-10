@@ -26,7 +26,7 @@ void sharpen_shutdown(void);
 void sharpen_set_strength(int percent);   // 0..100
 void sharpen_set_below(int width);        // sharpen only 3D images narrower than this (0: the game's default)
 void sharpen_set_enabled(int on);         // the setting (with OPT and opt.txt's sharpen)
-void sharpen_set_style(int classic);      // the setting: 0 adaptive (CAS weighting), 1 classic unsharp mask
+void sharpen_set_style(int style);        // the setting: 0 adaptive (CAS weighting), 1 classic, 2 adaptive x2
 // main.c's sceGxmBeginScene hook, before the game's call: runs our pass when
 // it is the framebuffer scene of stage 4 (returns 1 if it did)
 int sharpen_before_scene(void *ctx, uint32_t ret_addr, int stage);
