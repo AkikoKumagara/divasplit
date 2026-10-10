@@ -129,7 +129,7 @@ checks `centre` and `lsort` on the host against the game's versions.
 | Cut | Where | What | Expected (light / heavy frames) |
 |---|---|---|---|
 | `centre` | hook `0x245CDC` | The 3D sort keys average a skinned object's centre over its bones: per bone `xform(inverse(W) * B_i * (W * X), c)`, two 4x4 products and a transform. Linear in `B_i`: sum the bones first, then one product chain. Same up to float rounding (host test: 8e-6 relative). Called only from `0x246050` (stage 3, main thread). | 0.45 / 0.8 ms |
-| `dirty` | patch `0x4DF012` (32 bytes) | `0x4DEF04` (once per draw flush, gated by `[T+0x1B50]`) clears 224 dirty-flag bytes at `T+0x1A2A` one by one (`if (b) b = 0`); replaced by `memset` (stub `0x65F5D8`). Same memory afterwards. | 0.4–0.5 / 0.55–0.65 ms |
+| `dirty` | patch `0x4DF012` (32 bytes) | `0x4DEF04` (once per draw flush, gated by `[T+0x1B50]`) clears 224 dirty-flag bytes at `T+0x1A2A` one by one (`if (b) b = 0`); patched once at game start to call the plugin, which does one `memset` (cut on) or the same loop (off). Same memory afterwards. Patching it at run time instead (for A/B) risks a core still holding the old bytes. | 0.4–0.5 / 0.55–0.65 ms |
 | `lsort` | hook `0x5ABB9C` | `std::list::sort` of the draw lists allocates 27 list heads per call from a locked heap. Bottom-up merge sort over static arrays: stable, the same order. Callers `0x246A68/90/B0` only. | 0.08 / 0.15 ms |
 | `nosort0` | stage table byte `0x81B628A1` | Skip sorting the opaque list 0 front to back (`0x265ACE`). Changes draw order (coplanar flicker possible); off by default. | +0.2 ms on top of the others |
 

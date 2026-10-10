@@ -660,9 +660,15 @@ static void opt_file_load(void) {
     if (fd >= 0) {
         int len = sceIoRead(fd, buf, sizeof(buf) - 1);
         sceIoClose(fd);
-        for (int i = 0; i < len; i++)   // one key per line works too
-            if (buf[i] == '\n' || buf[i] == '\r' || buf[i] == '\t')
+        int comment = 0;
+        for (int i = 0; i < len; i++) {   // one key per line works too; # starts a comment
+            if (buf[i] == '#')
+                comment = 1;
+            else if (buf[i] == '\n' || buf[i] == '\r')
+                comment = 0;
+            if (comment || buf[i] == '\n' || buf[i] == '\r' || buf[i] == '\t')
                 buf[i] = ' ';
+        }
         for (unsigned int k = 0; len > 0 && k < sizeof(KEYS) / sizeof(KEYS[0]); k++) {
             int v;
             if (settings_get_int(buf, buf + len, KEYS[k].key, &v))

@@ -216,8 +216,23 @@ static int test_sort(void) {
     return 0;
 }
 
+/* prints the dirty-flag patch for a sample plugin address, for checking with a
+   disassembler (the bytes go at seg0+0x4DF012) */
+static void print_patch(void) {
+    static const uint32_t fns[] = {0x98123457u, 0x8FFFF801u, 0x81A5C80Du};
+    for (int k = 0; k < 3; k++) {
+        uint8_t p[32];
+        cuts_dirty_patch(p, fns[k]);
+        printf("dirty patch (fn 0x%08X): ", fns[k]);
+        for (int i = 0; i < 32; i++)
+            printf("%02x", p[i]);
+        printf("\n");
+    }
+}
+
 int main(void) {
     srand(1);
+    print_patch();
     int bad = test_centre();
     bad |= test_sort();
     printf(bad ? "FAILED\n" : "ok\n");
