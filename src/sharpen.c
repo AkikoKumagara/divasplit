@@ -309,8 +309,11 @@ static int ensure_target(const SceGxmTexture *src) {
 
 /* ---- the pass and the blit ---------------------------------------------- */
 
+// an engine texture object (0x4E16E4, glBindTexture): word 0 bit 1 = initialized, the
+// SceGxmTexture at +8; +0x30 is only "bound right now" (cleared when unbound, as FBO 11
+// is by the time our pass runs, before the next frame's blit)
 static const SceGxmTexture *engine_tex(const uint8_t *obj) {
-    if (!obj || !(*(const volatile uint32_t *)obj & 2) || !*(void *const volatile *)(obj + 0x30))
+    if (!obj || !(*(const volatile uint32_t *)obj & 2))
         return NULL;
     return (const SceGxmTexture *)(obj + 8);
 }
