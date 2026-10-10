@@ -10,6 +10,9 @@
  *     VitaGrafix is installed
  *   - optional (SQUARE): the profiler kernel plugin, ur0:tai/divasplit_prof.skprx
  *     under *KERNEL
+ *   - the plugin's shaders, compiled with the system's shader compiler when
+ *     ur0:data/libshacccg.suprx is there (extracted with ShaRKF00D), into
+ *     ux0:data/divasplit/shaders/<name>.gxp; on errors <name>.log says why
  *
  * Files come from the VPK (app0:payload). Files in ux0:data/divasplit/install/
  * (same names) take priority and are deleted after a successful install, so a
@@ -22,6 +25,8 @@
  * temporary file.
  */
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/modulemgr.h>
+#include <psp2/shacccg.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/display.h>
@@ -65,6 +70,9 @@
 #define VG_PATCHLIST "ux0:data/VitaGrafix/patchlist.txt"
 #define VG_CONFIG    "ux0:data/VitaGrafix/config.txt"
 #define MAX_BLOCKS   16
+#define SHACC_PATH   "ur0:data/libshacccg.suprx"
+#define SHADER_SRC   PAYLOAD_DIR "/shaders"
+#define SHADER_DIR   "ux0:data/divasplit/shaders"
 
 #define C_BG     0xFF201812
 #define C_TEXT   0xFFE0E0E0
@@ -477,6 +485,98 @@ static int step(int ok, const char *what) {
     return ok;
 }
 
+/* shaders: <name>_v.cg / <name>_f.cg from the payload -> SHADER_DIR/<name>_v.gxp ... */
+
+static SceShaccCgSourceFile g_src;
+
+static SceShaccCgSourceFile *shacc_open(const char *name, const SceShaccCgSourceLocation *from,
+        const SceShaccCgCompileOptions *opts, const char **err) {
+    (void)name; (void)from; (void)opts; (void)err;
+    return &g_src;
+}
+
+static int compile_one(const char *name, char *text, size_t len) {
+    size_t n = strlen(name);
+    int frag = n > 5 && name[n - 4] == 'f';   // ..._f.cg
+    g_src.fileName = name;
+    g_src.text = text;
+    g_src.size = (SceUInt32)len;
+    SceShaccCgCompileOptions o;
+    sceShaccCgInitializeCompileOptions(&o);
+    o.mainSourceFile = name;
+    o.targetProfile = frag ? SCE_SHACCCG_PROFILE_FP : SCE_SHACCCG_PROFILE_VP;
+    o.entryFunctionName = "main";
+    o.useFx = 1;
+    o.optimizationLevel = 3;
+    o.useFastmath = 1;
+    o.warningLevel = 1;
+    SceShaccCgCallbackList cb;
+    sceShaccCgInitializeCallbackList(&cb, SCE_SHACCCG_TRIVIAL);
+    cb.openFile = shacc_open;
+    const SceShaccCgCompileOutput *out = sceShaccCgCompileProgram(&o, &cb, 0);
+
+    char base[64], path[256];
+    snprintf(base, sizeof(base), "%.*s", (int)(n - 3), name);
+    int ok = out && out->programData;
+    if (out && out->diagnosticCount > 0) {   // warnings or errors: keep them next to the output
+        snprintf(path, sizeof(path), SHADER_DIR "/%s.log", base);
+        SceUID fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+        for (int i = 0; fd >= 0 && i < out->diagnosticCount; i++) {
+            const SceShaccCgDiagnosticMessage *m = &out->diagnostics[i];
+            char line[512];
+            int k = snprintf(line, sizeof(line), "%s line %u: %s\n",
+                    m->level == SCE_SHACCCG_DIAGNOSTIC_LEVEL_ERROR ? "error" :
+                    m->level == SCE_SHACCCG_DIAGNOSTIC_LEVEL_WARNING ? "warning" : "info",
+                    m->location ? (unsigned)m->location->lineNumber : 0u, m->message);
+            sceIoWrite(fd, line, k < (int)sizeof(line) ? k : (int)sizeof(line) - 1);
+        }
+        if (fd >= 0)
+            sceIoClose(fd);
+    }
+    if (ok) {
+        snprintf(path, sizeof(path), SHADER_DIR "/%s.gxp", base);
+        ok = write_raw(path, out->programData, out->programSize) == 0;
+    }
+    if (out)
+        sceShaccCgDestroyCompileOutput(out);
+    return ok;
+}
+
+// 1: all compiled, 0: some failed, -1: no compiler
+static int compile_shaders(void) {
+    if (!exists(SHACC_PATH))
+        return -1;
+    static SceUID mod = -1;
+    if (mod < 0) {
+        mod = sceKernelLoadStartModule(SHACC_PATH, 0, NULL, 0, NULL, NULL);
+        if (mod < 0)
+            return 0;
+        sceShaccCgSetDefaultAllocator(malloc, free);
+    }
+    sceIoMkdir("ux0:data/divasplit", 0777);
+    sceIoMkdir(SHADER_DIR, 0777);
+    SceUID d = sceIoDopen(SHADER_SRC);
+    if (d < 0)
+        return 1;   // nothing to compile
+    int ok = 1;
+    SceIoDirent e;
+    while (sceIoDread(d, &e) > 0) {
+        size_t n = strlen(e.d_name);
+        if (n < 6 || strcmp(e.d_name + n - 3, ".cg") != 0)
+            continue;
+        char path[256];
+        snprintf(path, sizeof(path), SHADER_SRC "/%s", e.d_name);
+        size_t len = 0;
+        char *text = read_file(path, &len);
+        int r = text && compile_one(e.d_name, text, len);
+        free(text);
+        step(r, e.d_name);
+        ok &= r;
+    }
+    sceIoDclose(d);
+    return ok;
+}
+
 // returns 1 when a reboot is needed, 0 when not, -1 on errors
 static int install(const state_t *s) {
     int reboot = 0, fail = 0;
@@ -537,6 +637,12 @@ static int install(const state_t *s) {
         free(out);
         free(cfg);
     }
+
+    int sh = compile_shaders();
+    if (sh < 0)
+        say(C_DIM, "  (no " SHACC_PATH ": shaders not compiled, sharpening stays off)");
+    else if (sh == 0)
+        say(C_WARN, "  some shaders didn't compile: see " SHADER_DIR "/*.log");
 
     if (fail) {
         say(C_ERR, "Something failed. Edited files have a .bak copy next to them.");

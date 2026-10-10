@@ -51,15 +51,17 @@ enum {
     OPT_KEYSET = 1 << 10,   // ROB_BASE key-set loop inlined (RobThreads)
     OPT_H2F = 1 << 11,      // half -> float replaced (patched at start, if set then)
     OPT_NOLOG = 1 << 12,    // DSC trace log skipped (patched at start, if set then)
+    OPT_SHARPEN = 1 << 13,  // sharpening of the 3D image as it is stretched to the screen (sharpen.c)
 };
 #define OPT_DEFAULT (OPT_CENTRE | OPT_DIRTY | OPT_LSORT | OPT_UREUSE | OPT_MATDUP | OPT_PALETTE \
-        | OPT_TEXWRAP | OPT_KEYSET | OPT_H2F | OPT_NOLOG)
+        | OPT_TEXWRAP | OPT_KEYSET | OPT_H2F | OPT_NOLOG | OPT_SHARPEN)
 
 // engine optimizations (opt.c); *on switches them at run time
 int opt_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, uint32_t matmul_off,
         const opt_cuts_t *cuts, volatile int *on);
 void opt_shutdown(void);
 void opt_set_mask(unsigned int mask);
+int opt_cut_on(unsigned int bit);     // OPT on for this cut (and its A/B arm): for cuts outside opt.c
 void opt_set_abmask(unsigned int mask);   // cuts the A/B compares; the others stay on (0: all)
 void opt_set_mode_ptr(volatile const int *mode);   // the OPT setting (2 = A/B)
 unsigned int opt_mask(void);

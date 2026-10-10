@@ -1,0 +1,11 @@
+/*
+ * The game's final blit (3D image -> framebuffer) as a clip-space quad:
+ * t is the corner (0..1), rect the image's area in the texture (u0 v0 u1 v1),
+ * top-left corner = (u0, v0) as in the game's own quad.
+ */
+void main(float2 position, float2 t, uniform float4 rect,
+          out float4 vPosition : POSITION, out float2 vTexcoord : TEXCOORD0)
+{
+    vPosition = float4(position, 0.5, 1.0);
+    vTexcoord = rect.xy + t * (rect.zw - rect.xy);
+}

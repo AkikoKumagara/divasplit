@@ -103,6 +103,7 @@
 #include "threadview.h"
 #include "prof.h"
 #include "opt.h"
+#include "sharpen.h"
 #include "trace.h"
 
 #define STAGE_MAX 32
@@ -145,6 +146,7 @@ typedef struct {
     uint32_t probe_ret[3];   // uniform reuse (opt.c): seg0 return offsets of the shader
                              // binding's memcpy, reserve, SetUniformDataF calls (0: unknown)
     const opt_cuts_t *cuts;  // main-thread cuts (opt.c), NULL: none
+    const sharpen_game_t *sharpen;   // sharpening of the 3D image (sharpen.c), NULL: none
 } game_t;
 
 // f 2nd EU 1.00 (docs/engine-notes.md "Main-thread cuts")
@@ -163,6 +165,10 @@ static const opt_cuts_t F2ND_CUTS = {
     .dirty_loop = 0x4DF012, .list_sort = 0x5ABB9C, .sort0_flag = 0x4478A1, .r2 = &F2ND_R2,
 };
 
+// the final blit of the 3D image (sharpen.c); the GL state and its bound texture units
+static const sharpen_game_t F2ND_SHARPEN = {.blit = 0x25E208, .blit_ret = 0x26124A, .d_gl = 0x6032A8,
+        .tex_units = 0x1217C4};
+
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
     {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0, {0}, NULL},
@@ -170,7 +176,7 @@ static const game_t GAMES[] = {
     {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}, NULL},
     // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
     // uniform reuse off (see opt.c); f 2nd's offsets: {0x4DE90A, 0x4DE8B8, 0x4DE8EA}
-    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS},
+    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS, &F2ND_SHARPEN},
 };
 #define GAME_COUNT (int)(sizeof(GAMES) / sizeof(GAMES[0]))
 
@@ -681,7 +687,7 @@ static void opt_file_load(void) {
         unsigned int bit;
     } KEYS[] = {{"centre", OPT_CENTRE}, {"dirty", OPT_DIRTY}, {"lsort", OPT_LSORT},
             {"nosort0", OPT_NOSORT0}, {"pin", OPT_PIN}, {"check", OPT_CHECK},
-            {"ureuse", OPT_UREUSE}, {"matdup", OPT_MATDUP}, {"palette", OPT_PALETTE},
+            {"ureuse", OPT_UREUSE}, {"matdup", OPT_MATDUP}, {"palette", OPT_PALETTE}, {"sharpen", OPT_SHARPEN},
             {"texwrap", OPT_TEXWRAP}, {"keyset", OPT_KEYSET}, {"h2f", OPT_H2F}, {"nolog", OPT_NOLOG}};
     static char buf[1024];   // the input thread, after module_start
     unsigned int mask = OPT_DEFAULT, ab = 0;
@@ -709,6 +715,14 @@ static void opt_file_load(void) {
                 mask = v ? mask | KEYS[k].bit : mask & ~KEYS[k].bit;
                 if (v == 2)   // on, and the one A/B compares (the others stay on)
                     ab |= KEYS[k].bit;
+            }
+        }
+        int v;
+        if (len > 0 && settings_get_int(buf, buf + len, "sharpness", &v)) {
+            static int last = -1;
+            if (v != last) {
+                sharpen_set_strength(v);
+                last = v;
             }
         }
     }
@@ -807,6 +821,10 @@ static int input_thread(SceSize args, void *argp) {
                 diag("%us opt %d (%d) %s", secs, g_opt, g_opt_on, line);
                 for (int part = 0; part < 4; part++) {
                     opt_diag2(line, sizeof(line), part);
+                    diag("%us opt %d (%d) %s", secs, g_opt, g_opt_on, line);
+                }
+                if (g_game->sharpen) {
+                    sharpen_diag(line, sizeof(line));
                     diag("%us opt %d (%d) %s", secs, g_opt, g_opt_on, line);
                 }
             }
@@ -925,12 +943,18 @@ int module_start(SceSize argc, const void *args) {
     int opt = opt_init(info.modid, g_text_base, g_seg1, g_game->opt_matmul, g_game->cuts, &g_opt_on);
     opt_set_stage_ptr(&g_cur_stage);
     opt_set_mode_ptr(&g_opt);
+    if (g_game->sharpen)
+        sharpen_init(info.modid, g_text_base, g_seg1, g_game->sharpen);
     {
         char line[256];
         opt_diag(line, sizeof(line));
         diag("optimizations: matmul %08X, %s", opt, line);
         opt_diag2(line, sizeof(line), 0);
         diag("optimizations: %s", line);
+        if (g_game->sharpen) {
+            sharpen_diag(line, sizeof(line));
+            diag("optimizations: %s", line);
+        }
     }
     // dev tools, with the profiler kernel plugin installed (an unresolved import returns -1)
     if (divasplit_prof_stop() >= 0)
@@ -951,6 +975,7 @@ int module_stop(SceSize argc, const void *args) {
     if (g_prof_state == 1)
         divasplit_prof_stop();
     tv_shutdown();
+    sharpen_shutdown();
     opt_shutdown();
     trace_shutdown();
     if (g_thread >= 0) {

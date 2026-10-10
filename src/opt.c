@@ -1031,6 +1031,10 @@ void opt_set_scenes_tracked(int ok) {
     s_scenes_tracked = ok;
 }
 
+int opt_cut_on(unsigned int bit) {
+    return s_on && cut_on(bit);
+}
+
 void opt_set_mask(unsigned int mask) {
     s_mask = mask;
 }

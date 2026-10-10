@@ -32,7 +32,7 @@ vita_create_self(divasplit_prof.skprx divasplit_prof
 )
 vita_create_stubs(prof_stubs divasplit_prof ${CMAKE_SOURCE_DIR}/prof/divasplit_prof.yml KERNEL)
 
-add_executable(${PROJECT_NAME} src/main.c src/threadview.c src/opt.c src/trace.c)
+add_executable(${PROJECT_NAME} src/main.c src/threadview.c src/opt.c src/trace.c src/sharpen.c)
 target_link_options(${PROJECT_NAME} PRIVATE -nostdlib)
 add_dependencies(${PROJECT_NAME} prof_stubs)
 
@@ -89,6 +89,7 @@ target_link_libraries(divasplit_installer
   SceLibKernel_stub
   SceIofilemgr_stub
   SceKernelThreadMgr_stub
+  SceShaccCg_stub_weak
 )
 
 # vita.cmake appends to these in the caller's scope: start each module clean
@@ -96,7 +97,7 @@ unset(VITA_ELF_CREATE_FLAGS)
 unset(VITA_MAKE_FSELF_FLAGS)
 vita_create_self(eboot.bin divasplit_installer UNSAFE)
 vita_create_vpk(divasplit_installer.vpk DVSP00001 eboot.bin
-  VERSION 01.09
+  VERSION 02.00
   NAME "divasplit installer"
   FILE installer/sce_sys/icon0.png sce_sys/icon0.png
   FILE installer/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
@@ -108,4 +109,6 @@ vita_create_vpk(divasplit_installer.vpk DVSP00001 eboot.bin
   FILE vitagrafix/divax.txt payload/vitagrafix/divax.txt
   FILE vitagrafix/divaf.txt payload/vitagrafix/divaf.txt
   FILE vitagrafix/divaf2nd.txt payload/vitagrafix/divaf2nd.txt
+  FILE shaders/blit_v.cg payload/shaders/blit_v.cg
+  FILE shaders/rcas_f.cg payload/shaders/rcas_f.cg
 )
