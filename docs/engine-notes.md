@@ -195,6 +195,16 @@ Timing run (2026-10-10, f 2nd heavy PV, AVS off, A/B, 200 windows): frame time
 +0.08, outside the stages +0.26 ± 0.22, GPU wait +0.20. fps 51.3 → 55.9
 (worst 10% of seconds 31.4 → 49.9; seconds at 60: 25% → 40%).
 
+Follow-ups (2026-10-10):
+- `ucopy` A/B (only it compared, the rest on): stage 3 +0.06 ± 0.06 ms, stage 5
+  −0.01: no gain. Copies into the ring cost per byte, not per call.
+- Profiled A/B of the whole set (`profview --ab`): outside the render stages
+  game + library time is 0.23 ms *lower* with OPT on; the +0.26 from log.csv
+  was noise. `keyset`: the game's path (loop + evaluator + half → float) costs
+  0.43 / 0.53 ms per frame on the two RobThreads, the plugin 0.30 / 0.38.
+  `__tls_get_addr` called straight from the eboot is ~0.1 ms per frame (not
+  worth a cache).
+
 Stage 3 is not the only thing that grows in heavy frames: PVGAME ctrl
 (`0x5F1B40`) grows 0.23 → 0.48 ms, in the PV script `0x3256EC` → `0x325374` →
 `0x31B346`, which runs before the ROB_BASE kick.
@@ -240,6 +250,11 @@ Stage 3 is not the only thing that grows in heavy frames: PVGAME ctrl
   promoted to `double` and passed in `d0`, not `s0`, so the game's function
   gets garbage. Hooks with float arguments call on through a prototyped
   pointer (`TAI_NEXT` in `src/opt.c`).
+- profview's inclusive times and its `[lib]` / `[kernel]` labels can be
+  wrong for samples in plugin code: the stack scan picks up stale return
+  addresses (a 4x4 inverse looked +0.34 ms "on the stack" with OPT on while
+  its own samples went down; the vblank wait got labelled `__tls_get_addr`).
+  Count samples by pc range, or by lr when it returns into the eboot.
 - Profiles split at 18 ms are biased (every function gains about one sample
   in the 17–19 ms buckets). Classify frames by vblank count instead.
 
