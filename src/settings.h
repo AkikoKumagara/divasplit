@@ -46,7 +46,7 @@ static const preset_t PRESETS[] = {
 typedef struct {
     int preset, sync, avs, bar, rec, opt;
     int drs, sharp;   // dynamic resolution, sharpening of the 3D image (f, f 2nd)
-    int style;        // sharpening: 0 adaptive, 1 classic, 2 adaptive + AA (FXAA, then adaptive)
+    int style;        // sharpening: 0 adaptive, 1 classic
 } game_settings_t;
 
 typedef struct {

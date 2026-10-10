@@ -62,13 +62,11 @@ static int current_game(const settings_t *s) {
 static int g_menu_preset = 0;   // preset of the shown game, read when the title loads
 static int g_menu_style = 0;    // its sharpening style
 
-// the order the button cycles through: adaptive, adaptive + AA, classic (settings values 0, 2, 1)
-static const char *const STYLE_NAME[3] = {"adaptive", "classic", "adaptive + AA"};
-static const int STYLE_NEXT[3] = {2, 0, 1};
+static const char *const STYLE_NAME[2] = {"adaptive", "classic"};
 
 static void set_style_label(int style) {
     char label[64];
-    sceClibSnprintf(label, sizeof(label), "Sharpening: %s", STYLE_NAME[style >= 0 && style <= 2 ? style : 0]);
+    sceClibSnprintf(label, sizeof(label), "Sharpening: %s", STYLE_NAME[style == 1]);
     QuickMenuRebornSetWidgetLabel(STYLE_ID, label);
 }
 
@@ -124,7 +122,7 @@ BUTTON_HANDLER(on_style) {
     settings_t s;
     settings_load(&s);
     int g = current_game(&s);
-    s.game[g].style = STYLE_NEXT[s.game[g].style >= 0 && s.game[g].style <= 2 ? s.game[g].style : 0];
+    s.game[g].style = s.game[g].style != 1;
     settings_save(&s);
     set_style_label(s.game[g].style);
 }
