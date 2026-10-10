@@ -165,9 +165,10 @@ static const opt_cuts_t F2ND_CUTS = {
     .dirty_loop = 0x4DF012, .list_sort = 0x5ABB9C, .sort0_flag = 0x4478A1, .r2 = &F2ND_R2,
 };
 
-// the final blit of the 3D image (sharpen.c); the GL state and its bound texture units
-static const sharpen_game_t F2ND_SHARPEN = {.blit = 0x25E208, .blit_ret = 0x26124A, .d_gl = 0x6032A8,
-        .tex_units = 0x1217C4};
+// the final blit of the 3D image and the framebuffer scene's begin (sharpen.c); the GL
+// state and its bound texture units
+static const sharpen_game_t F2ND_SHARPEN = {.blit = 0x25E208, .blit_ret = 0x26124A, .begin_ret = 0x4E0802,
+        .d_gl = 0x6032A8, .tex_units = 0x1217C4};
 
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
@@ -519,6 +520,8 @@ static int render_stage_hook(int stage) {
 
 static int begin_scene_hook(void *ctx, unsigned int flags, const void *rt, const void *region,
         void *vsync, void *fsync, const void *color, const void *depth) {
+    if (g_game && g_game->sharpen)   // its own scene first, when this is stage 4's framebuffer scene
+        sharpen_before_scene(ctx, (uint32_t)__builtin_return_address(0), g_cur_stage);
     probe_scene();
     uint64_t t0 = sceKernelGetProcessTimeWide();
     uint64_t tr0 = trace_on() ? trace_now() : 0;

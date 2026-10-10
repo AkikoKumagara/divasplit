@@ -1,0 +1,24 @@
+/*
+ * Sharpening of the 3D image at its own resolution, before the game stretches
+ * it: an unsharp mask on the 4 direct neighbours, clamped to their minimum /
+ * maximum so edges get crisper without halos. Kept cheap (5 reads, no
+ * divisions, half precision): the stock-clocked Vita GPU is what limits heavy
+ * PVs, and AMD's RCAS here cost 12 ms a frame at screen resolution.
+ *
+ *   k.xy  one texel in UV, k.z amount (0 = off, 2 = strong), k.w overshoot
+ *         allowed past the neighbours' range, as a fraction of it
+ *   lim   the image's area in the texture, half a texel in (the rest is stale)
+ */
+half4 main(float2 uv : TEXCOORD0, uniform sampler2D tex, uniform float4 k, uniform float4 lim) : COLOR
+{
+    half4 e = tex2D(tex, uv);
+    half3 b = tex2D(tex, clamp(uv + float2(0.0, -k.y), lim.xy, lim.zw)).rgb;
+    half3 d = tex2D(tex, clamp(uv + float2(-k.x, 0.0), lim.xy, lim.zw)).rgb;
+    half3 f = tex2D(tex, clamp(uv + float2(k.x, 0.0), lim.xy, lim.zw)).rgb;
+    half3 h = tex2D(tex, clamp(uv + float2(0.0, k.y), lim.xy, lim.zw)).rgb;
+    half3 mn = min(e.rgb, min(min(b, d), min(f, h)));
+    half3 mx = max(e.rgb, max(max(b, d), max(f, h)));
+    half3 s = e.rgb + (half)k.z * (e.rgb - (b + d + f + h) * (half)0.25);
+    half3 over = (mx - mn) * (half)k.w;
+    return half4(clamp(s, mn - over, mx + over), e.a);
+}
