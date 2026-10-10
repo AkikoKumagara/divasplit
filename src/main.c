@@ -104,6 +104,7 @@
 #include "prof.h"
 #include "opt.h"
 #include "sharpen.h"
+#include "drs.h"
 #include "trace.h"
 
 #define STAGE_MAX 32
@@ -147,6 +148,7 @@ typedef struct {
                              // binding's memcpy, reserve, SetUniformDataF calls (0: unknown)
     const opt_cuts_t *cuts;  // main-thread cuts (opt.c), NULL: none
     const sharpen_game_t *sharpen;   // sharpening of the 3D image (sharpen.c), NULL: none
+    const drs_game_t *drs;           // dynamic resolution of the 3D world (drs.c), NULL: none
 } game_t;
 
 // f 2nd EU 1.00 (docs/engine-notes.md "Main-thread cuts")
@@ -170,6 +172,9 @@ static const opt_cuts_t F2ND_CUTS = {
 static const sharpen_game_t F2ND_SHARPEN = {.blit = 0x25E208, .blit_ret = 0x26124A, .begin_ret = 0x4E0802,
         .d_gl = 0x6032A8, .tex_units = 0x1217C4};
 
+// the render manager's per-frame setup, which writes the 3D size (drs.c)
+static const drs_game_t F2ND_DRS = {.stage0 = 0x25E32E};
+
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
     {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0, {0}, NULL},
@@ -177,7 +182,7 @@ static const game_t GAMES[] = {
     {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}, NULL},
     // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
     // uniform reuse off (see opt.c); f 2nd's offsets: {0x4DE90A, 0x4DE8B8, 0x4DE8EA}
-    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS, &F2ND_SHARPEN},
+    {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS, &F2ND_SHARPEN, &F2ND_DRS},
 };
 #define GAME_COUNT (int)(sizeof(GAMES) / sizeof(GAMES[0]))
 
@@ -263,12 +268,14 @@ static uint64_t g_win_3d;
 static unsigned int g_win_frames, g_win_3d_n;
 #define LOG_STAGES 8                  // per-stage CPU time columns st0..st7
 static uint64_t g_win_st[LOG_STAGES];
+static unsigned int g_win_res;           // sum of the 3D widths (drs.c) of the window's frames
 static uint32_t g_win_prof[PROF_COUNT];
 
 typedef struct {
     int valid;
     int fps10, cpu10, gpu10, vs10, s3d10;  // tenths
     int st10[LOG_STAGES];                  // CPU time per frame of each stage (waits for the GPU excluded)
+    int res_w;                             // average 3D width (drs.c), 0: not dynamic
     int late;                              // AVS-skipped waits in the last second
     int prof10[PROF_COUNT];
 } perf_t;
@@ -376,6 +383,8 @@ static void log_line(uint64_t now) {
         n += sceClibSnprintf(line + n, LOG_LINE - n, ",%d.%d", MS(g_perf.st10[k]));
     if (n < LOG_LINE - 16)   // the next window's first frame (the profiler's frame numbers)
         n += sceClibSnprintf(line + n, LOG_LINE - n, ",%u", g_frame);
+    if (n < LOG_LINE - 16)
+        n += sceClibSnprintf(line + n, LOG_LINE - n, ",%d", g_perf.res_w);
     line[n++] = '\n';
     g_log_len[head % LOG_SLOTS] = n;
     __sync_synchronize();
@@ -391,7 +400,7 @@ static void log_flush(void) {
                 "t,game,preset,sync,avs,opt,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap,"
                 "main_run,main_ready,main_wait,core0,core1,core2,core3,"
                 "up_copies,up_bytes,up_blocks,up_block_bytes,up_reused,up_reused_bytes,up_setdata,up_overflow,"
-                "st0,st1,st2,st3,st4,st5,st6,st7,frame\n";
+                "st0,st1,st2,st3,st4,st5,st6,st7,frame,res_w\n";
             sceIoWrite(g_log_fd, hdr, sizeof(hdr) - 1);
         }
     }
@@ -416,6 +425,7 @@ static void window_reset(uint64_t now) {
     g_win_frames = g_win_3d_n = 0;
     g_win_3d = 0;
     sceClibMemset(g_win_st, 0, sizeof(g_win_st));
+    g_win_res = 0;
     sceClibMemset(g_win_prof, 0, sizeof(g_win_prof));
 }
 
@@ -428,6 +438,15 @@ static void frame_boundary(uint64_t now) {
 
     if (g_last_frame) {
         g_win_frames++;
+        // dynamic resolution: the frame that just ended, its waits for the GPU and vblank
+        static uint64_t pf_gpu, pf_vs;
+        if (g_game->drs) {
+            g_win_res += (unsigned int)drs_width();
+            drs_frame((unsigned int)(now - g_last_frame), (unsigned int)(g_gpu_total - pf_gpu),
+                    (unsigned int)(g_vs_total - pf_vs));
+        }
+        pf_gpu = g_gpu_total;
+        pf_vs = g_vs_total;
         // the profiler slots hold the last frame's times
         if (fm && g_game->has_profiler) {
             for (int k = 0; k < PROF_COUNT; k++) {
@@ -465,6 +484,7 @@ static void frame_boundary(uint64_t now) {
     g_perf.s3d10 = g_win_3d_n ? (int)(g_win_3d / g_win_3d_n / 100) : 0;
     for (int k = 0; k < LOG_STAGES; k++)
         g_perf.st10[k] = (int)(g_win_st[k] / g_win_frames / 100);
+    g_perf.res_w = (int)(g_win_res / g_win_frames);
     g_perf.late = (int)(g_late_total - g_win_late_start);
     for (int k = 0; k < PROF_COUNT; k++)
         g_perf.prof10[k] = (int)(g_win_prof[k] / g_win_frames / 100);
@@ -690,7 +710,7 @@ static void opt_file_load(void) {
         unsigned int bit;
     } KEYS[] = {{"centre", OPT_CENTRE}, {"dirty", OPT_DIRTY}, {"lsort", OPT_LSORT},
             {"nosort0", OPT_NOSORT0}, {"pin", OPT_PIN}, {"check", OPT_CHECK},
-            {"ureuse", OPT_UREUSE}, {"matdup", OPT_MATDUP}, {"palette", OPT_PALETTE}, {"sharpen", OPT_SHARPEN},
+            {"ureuse", OPT_UREUSE}, {"matdup", OPT_MATDUP}, {"palette", OPT_PALETTE}, {"sharpen", OPT_SHARPEN}, {"drs", OPT_DRS},
             {"texwrap", OPT_TEXWRAP}, {"keyset", OPT_KEYSET}, {"h2f", OPT_H2F}, {"nolog", OPT_NOLOG}};
     static char buf[1024];   // the input thread, after module_start
     unsigned int mask = OPT_DEFAULT, ab = 0;
@@ -720,7 +740,12 @@ static void opt_file_load(void) {
                     ab |= KEYS[k].bit;
             }
         }
-        int v;
+        int v, lo = 480, hi = 720;
+        if (len > 0) {   // dynamic resolution: the range of widths
+            settings_get_int(buf, buf + len, "drs_min", &lo);
+            settings_get_int(buf, buf + len, "drs_max", &hi);
+        }
+        drs_set_range(lo, hi);
         if (len > 0 && settings_get_int(buf, buf + len, "sharpness", &v)) {
             static int last = -1;
             if (v != last) {
@@ -828,6 +853,10 @@ static int input_thread(SceSize args, void *argp) {
                 }
                 if (g_game->sharpen) {
                     sharpen_diag(line, sizeof(line));
+                    diag("%us opt %d (%d) %s", secs, g_opt, g_opt_on, line);
+                }
+                if (g_game->drs) {
+                    drs_diag(line, sizeof(line));
                     diag("%us opt %d (%d) %s", secs, g_opt, g_opt_on, line);
                 }
             }
@@ -948,6 +977,8 @@ int module_start(SceSize argc, const void *args) {
     opt_set_mode_ptr(&g_opt);
     if (g_game->sharpen)
         sharpen_init(info.modid, g_text_base, g_seg1, g_game->sharpen);
+    if (g_game->drs)
+        drs_init(info.modid, g_game->drs);
     {
         char line[256];
         opt_diag(line, sizeof(line));
@@ -956,6 +987,10 @@ int module_start(SceSize argc, const void *args) {
         diag("optimizations: %s", line);
         if (g_game->sharpen) {
             sharpen_diag(line, sizeof(line));
+            diag("optimizations: %s", line);
+        }
+        if (g_game->drs) {
+            drs_diag(line, sizeof(line));
             diag("optimizations: %s", line);
         }
     }
@@ -978,6 +1013,7 @@ int module_stop(SceSize argc, const void *args) {
     if (g_prof_state == 1)
         divasplit_prof_stop();
     tv_shutdown();
+    drs_shutdown();
     sharpen_shutdown();
     opt_shutdown();
     trace_shutdown();

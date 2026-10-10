@@ -52,9 +52,10 @@ enum {
     OPT_H2F = 1 << 11,      // half -> float replaced (patched at start, if set then)
     OPT_NOLOG = 1 << 12,    // DSC trace log skipped (patched at start, if set then)
     OPT_SHARPEN = 1 << 13,  // sharpening of the 3D image as it is stretched to the screen (sharpen.c)
+    OPT_DRS = 1 << 14,      // dynamic resolution of the 3D world (drs.c)
 };
 #define OPT_DEFAULT (OPT_CENTRE | OPT_DIRTY | OPT_LSORT | OPT_UREUSE | OPT_MATDUP | OPT_PALETTE \
-        | OPT_TEXWRAP | OPT_KEYSET | OPT_H2F | OPT_NOLOG | OPT_SHARPEN)
+        | OPT_TEXWRAP | OPT_KEYSET | OPT_H2F | OPT_NOLOG | OPT_SHARPEN | OPT_DRS)
 
 // engine optimizations (opt.c); *on switches them at run time
 int opt_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, uint32_t matmul_off,

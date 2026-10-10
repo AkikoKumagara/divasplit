@@ -1,0 +1,169 @@
+/*
+ * Dynamic resolution (f 2nd): the 3D world's resolution follows the GPU load,
+ * full size while the GPU keeps up, lower only while a heavy PV would drop.
+ *
+ * The engine allocates its 3D render targets at 1024x544 once; the internal
+ * resolution is only a size in the render manager (mgr = *0x81B62808), used
+ * for viewports and texture coordinates:
+ *   +0x38/+0x3C     written every frame by the stage-0 setup seg0+0x25E32E
+ *                   (720x408 in a PV, VitaGrafix's IB patch changes those
+ *                   constants; 896x512 when byte +0x34 asks for it)
+ *   +0x18F4/+0x18F8 FBO 0 (3D world), +0x194C/+0x1950 FBO 11 (tonemap output,
+ *   +0x1954/+0x1958 FBO 12 (stage-2 pass): logical sizes, copied from the
+ *                   above only when the mode (+0x2C) changes; mode 0 is the PV
+ * The setup uses neither after writing them (the rest of it refreshes movie
+ * textures with their own sizes), so writing our size right after it returns
+ * makes the whole frame use it. Nothing is reallocated.
+ *
+ * Controller, per frame, on the main thread's own timings: a frame is late
+ * past 16.7 ms; GPU-bound when it also waited for the GPU (BeginScene /
+ * EndScene / display queue). Half of 8 frames late and GPU-bound: one step
+ * down at once. A second of frames on time with vblank slack and little GPU
+ * wait: one step up, but only after a hold that doubles each time a step up
+ * is undone within two seconds (and resets after ten quiet seconds).
+ */
+#include <psp2/kernel/clib.h>
+#include <taihen.h>
+
+#include "drs.h"
+#include "opt.h"
+
+#define STEP 32          // width per level
+#define LATE_US 17200
+#define GPU_BOUND_US 1000
+#define SLACK_US 3000
+
+static tai_hook_ref_t s_ref;
+static SceUID s_hook = -1;
+static int s_min = 480, s_max = 720;
+static int s_level;              // 0 = s_max, each level STEP narrower
+static int s_w;                  // width this frame (0: not applied)
+static int s_applied;            // this frame used our size: its timings count
+
+static unsigned int f_n, f_late, f_gpu, f_vs;        // down window (8 frames)
+static unsigned int u_n, u_late, u_gpu, u_vs;        // up window (60 frames)
+static unsigned int s_up_hold = 120, s_since_change, s_since_up = 100000;
+static volatile unsigned int d_down, d_up, d_undone, d_minw = 9999, d_maxw;
+
+static int level_w(int level) {
+    int w = s_max - level * STEP;
+    return w < s_min ? s_min : w;
+}
+
+static int levels(void) {
+    return (s_max - s_min + STEP - 1) / STEP;   // the last level is s_min
+}
+
+static int height_of(int w) {
+    return (w * 17 / 30 + 1) & ~1;   // 960:544 = 720:408 = 30:17, even
+}
+
+// seg0+0x25E32E(mgr), the stage-0 setup
+static void stage0_hook(uint8_t *mgr) {
+    int alt = mgr[0x34];   // the 896x512 request, cleared by the setup
+    TAI_CONTINUE(void, s_ref, mgr);
+    s_applied = 0;
+    s_w = 0;
+    if (alt || *(volatile int *)(mgr + 0x2C) != 0)   // not a PV, or the special size
+        return;
+    int bw = *(volatile int *)(mgr + 0x38), bh = *(volatile int *)(mgr + 0x3C);   // the engine's size
+    int w = bw, h = bh;
+    if (opt_cut_on(OPT_DRS)) {
+        w = level_w(s_level);
+        h = height_of(w);
+        s_applied = 1;
+    }
+    if (w < 16 || h < 16 || w > 1024 || h > 544)
+        return;
+    volatile int *p = (volatile int *)mgr;
+    p[0x38 / 4] = w;
+    p[0x3C / 4] = h;
+    p[0x18F4 / 4] = w;   // FBO 0
+    p[0x18F8 / 4] = h;
+    p[0x194C / 4] = w;   // FBO 11
+    p[0x1950 / 4] = h;
+    p[0x1954 / 4] = w;   // FBO 12
+    p[0x1958 / 4] = h;
+    s_w = w;
+    if (s_applied) {
+        if ((unsigned)w < d_minw)
+            d_minw = (unsigned)w;
+        if ((unsigned)w > d_maxw)
+            d_maxw = (unsigned)w;
+    }
+}
+
+void drs_frame(unsigned int frame_us, unsigned int gpu_us, unsigned int vs_us) {
+    if (!s_applied || frame_us > 200000) {   // not ours, or a stall (loading)
+        f_n = u_n = 0;
+        f_late = u_late = f_gpu = u_gpu = f_vs = u_vs = 0;
+        return;
+    }
+    s_since_change++;
+    s_since_up++;
+    int late = frame_us > LATE_US;
+    f_n++, f_late += late, f_gpu += gpu_us, f_vs += vs_us;
+    u_n++, u_late += late, u_gpu += gpu_us, u_vs += vs_us;
+    if (f_n >= 8) {
+        if (f_late >= 4 && f_gpu / f_n > GPU_BOUND_US && s_level < levels()) {
+            s_level++;
+            d_down++;
+            if (s_since_up < 120) {   // the last step up didn't hold
+                d_undone++;
+                if (s_up_hold < 1920)
+                    s_up_hold *= 2;
+            }
+            s_since_change = 0;
+            s_since_up = 100000;
+            u_n = u_late = u_gpu = u_vs = 0;
+        }
+        f_n = f_late = f_gpu = f_vs = 0;
+    }
+    if (u_n >= 60) {
+        if (u_late == 0 && u_vs / u_n > SLACK_US && u_gpu / u_n < GPU_BOUND_US / 2 && s_level > 0
+                && s_since_change >= s_up_hold) {
+            s_level--;
+            d_up++;
+            s_since_change = 0;
+            s_since_up = 0;
+        } else if (s_since_change > 600 && s_up_hold > 120) {
+            s_up_hold = 120;   // ten quiet seconds: try again sooner
+        }
+        u_n = u_late = u_gpu = u_vs = 0;
+    }
+}
+
+void drs_set_range(int min_w, int max_w) {
+    if (min_w < 320)
+        min_w = 320;
+    if (max_w > 960)
+        max_w = 960;
+    if (max_w < min_w)
+        max_w = min_w;
+    s_min = min_w;
+    s_max = max_w;
+    if (s_level > levels())
+        s_level = levels();
+}
+
+int drs_width(void) {
+    return s_w;
+}
+
+int drs_init(SceUID modid, const drs_game_t *g) {
+    s_hook = taiHookFunctionOffset(&s_ref, modid, 0, g->stage0, 1, stage0_hook);
+    return s_hook;
+}
+
+void drs_shutdown(void) {
+    if (s_hook >= 0)
+        taiHookRelease(s_hook, s_ref);
+    s_hook = -1;
+}
+
+int drs_diag(char *buf, int size) {
+    return sceClibSnprintf(buf, size, "drs: hook %08X range %d..%d now %dx%d level %d; down %u up %u undone %u"
+            " (up hold %u frames), widths seen %u..%u",
+            s_hook, s_min, s_max, s_w, s_w ? height_of(s_w) : 0, s_level, d_down, d_up, d_undone, s_up_hold,
+            d_minw == 9999 ? 0 : d_minw, d_maxw);
+}
