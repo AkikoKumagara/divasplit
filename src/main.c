@@ -88,6 +88,7 @@
  * Font: Terminus 8x14 Bold (SIL OFL 1.1), taken from Electry's PSVshell.
  */
 #include <psp2/kernel/modulemgr.h>
+#include <psp2/gxm.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/clib.h>
@@ -170,10 +171,10 @@ static const opt_cuts_t F2ND_CUTS = {
 // the final blit of the 3D image and the framebuffer scene's begin (sharpen.c); the GL
 // state and its bound texture units
 static const sharpen_game_t F2ND_SHARPEN = {.blit = 0x25E208, .blit_ret = 0x26124A, .begin_ret = 0x4E0802,
-        .d_gl = 0x6032A8, .tex_units = 0x1217C4};
+        .d_gl = 0x6032A8, .tex_units = 0x1217C4, .d_mgr = 0x447808, .fbo11 = 0x6B3164, .fbo11_size = 0x194C};
 
 // the render manager's per-frame setup, which writes the 3D size (drs.c)
-static const drs_game_t F2ND_DRS = {.stage0 = 0x25E32E};
+static const drs_game_t F2ND_DRS = {.stage0 = 0x25E32E, .scene_ret = 0x266588, .d_mgr = 0x447808};
 
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
@@ -540,8 +541,12 @@ static int render_stage_hook(int stage) {
 
 static int begin_scene_hook(void *ctx, unsigned int flags, const void *rt, const void *region,
         void *vsync, void *fsync, const void *color, const void *depth) {
+    uint32_t ra = (uint32_t)__builtin_return_address(0);
     if (g_game && g_game->sharpen)   // its own scene first, when this is stage 4's framebuffer scene
-        sharpen_before_scene(ctx, (uint32_t)__builtin_return_address(0), g_cur_stage);
+        sharpen_before_scene(ctx, ra, g_cur_stage);
+    SceGxmValidRegion vr;   // only the image's area of the 3D, tonemap and stage-2 targets
+    if (g_game && g_game->drs && !region && drs_scene_region(ra, color, &vr.xMax, &vr.yMax))
+        region = &vr;
     probe_scene();
     uint64_t t0 = sceKernelGetProcessTimeWide();
     uint64_t tr0 = trace_on() ? trace_now() : 0;
@@ -710,7 +715,7 @@ static void opt_file_load(void) {
         unsigned int bit;
     } KEYS[] = {{"centre", OPT_CENTRE}, {"dirty", OPT_DIRTY}, {"lsort", OPT_LSORT},
             {"nosort0", OPT_NOSORT0}, {"pin", OPT_PIN}, {"check", OPT_CHECK},
-            {"ureuse", OPT_UREUSE}, {"matdup", OPT_MATDUP}, {"palette", OPT_PALETTE}, {"sharpen", OPT_SHARPEN}, {"drs", OPT_DRS},
+            {"ureuse", OPT_UREUSE}, {"matdup", OPT_MATDUP}, {"palette", OPT_PALETTE}, {"sharpen", OPT_SHARPEN}, {"drs", OPT_DRS}, {"region", OPT_REGION},
             {"texwrap", OPT_TEXWRAP}, {"keyset", OPT_KEYSET}, {"h2f", OPT_H2F}, {"nolog", OPT_NOLOG}};
     static char buf[1024];   // the input thread, after module_start
     unsigned int mask = OPT_DEFAULT, ab = 0;
@@ -982,7 +987,7 @@ int module_start(SceSize argc, const void *args) {
     if (g_game->sharpen)
         sharpen_init(info.modid, g_text_base, g_seg1, g_game->sharpen);
     if (g_game->drs)
-        drs_init(info.modid, g_game->drs);
+        drs_init(info.modid, g_text_base, g_seg1, g_game->drs);
     {
         char line[256];
         opt_diag(line, sizeof(line));

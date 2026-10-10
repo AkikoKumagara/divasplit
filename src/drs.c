@@ -15,6 +15,13 @@
  * textures with their own sizes), so writing our size right after it returns
  * makes the whole frame use it. Nothing is reallocated.
  *
+ * Valid regions (OPT region): the engine begins every scene with none
+ * (0x266536 -> sceGxmBeginScene at 0x266584), so the GPU processes and stores
+ * all 1024x544 tiles of FBO 0 (4x MSAA F16), 11 and 12 though the image is
+ * 720x408. For those three we pass the image's area plus one texel (the
+ * stretch's bilinear edge reads it, as stock). The scene object is
+ * mgr+0x1074+0x80*i, colour surface at +0x24.
+ *
  * Controller, per frame, on the main thread's own timings: a frame is late
  * past 16.7 ms; GPU-bound when it also waited for the GPU (BeginScene /
  * EndScene / display queue). Half of 8 frames late and GPU-bound: one step
@@ -35,6 +42,9 @@
 #define SLACK_US 3000
 
 static tai_hook_ref_t s_ref;
+static uintptr_t s_seg1;
+static uint32_t s_scene_ret, s_d_mgr;
+static volatile unsigned int d_regions;
 static SceUID s_hook = -1;
 static int s_min = 480, s_max = 720;
 static int s_level;              // 0 = s_max, each level STEP narrower
@@ -154,7 +164,31 @@ int drs_width(void) {
     return s_w;
 }
 
-int drs_init(SceUID modid, const drs_game_t *g) {
+int drs_scene_region(uint32_t ret_addr, const void *color, unsigned int *xmax, unsigned int *ymax) {
+    if (ret_addr != s_scene_ret || !color || !opt_cut_on(OPT_REGION))
+        return 0;
+    const uint8_t *mgr = *(const uint8_t *const volatile *)(s_seg1 + s_d_mgr);
+    if (!mgr)
+        return 0;
+    int off = (int)((const uint8_t *)color - 0x24 - (mgr + 0x1074));
+    if (off < 0 || (off & 0x7F) != 0)
+        return 0;
+    int i = off >> 7;
+    if (i != 0 && i != 11 && i != 12)
+        return 0;
+    int w = *(const volatile int *)(mgr + 0x18F4 + 8 * i), h = *(const volatile int *)(mgr + 0x18F8 + 8 * i);
+    if (w < 16 || h < 16 || w >= 1024 || h >= 544)
+        return 0;   // the whole texture anyway
+    *xmax = (unsigned int)w;   // inclusive: the image and one texel past it
+    *ymax = (unsigned int)h;
+    d_regions++;
+    return 1;
+}
+
+int drs_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const drs_game_t *g) {
+    s_seg1 = seg1;
+    s_scene_ret = (uint32_t)(seg0 + g->scene_ret) | 1;
+    s_d_mgr = g->d_mgr;
     s_hook = taiHookFunctionOffset(&s_ref, modid, 0, g->stage0, 1, stage0_hook);
     return s_hook;
 }
@@ -167,7 +201,7 @@ void drs_shutdown(void) {
 
 int drs_diag(char *buf, int size) {
     return sceClibSnprintf(buf, size, "drs: hook %08X range %d..%d now %dx%d level %d; down %u up %u undone %u"
-            " (up hold %u frames), widths seen %u..%u",
+            " (up hold %u frames), widths seen %u..%u; regions %u",
             s_hook, s_min, s_max, s_w, s_w ? height_of(s_w) : 0, s_level, d_down, d_up, d_undone, s_up_hold,
-            d_minw == 9999 ? 0 : d_minw, d_maxw);
+            d_minw == 9999 ? 0 : d_minw, d_maxw, d_regions);
 }

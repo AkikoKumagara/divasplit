@@ -11,6 +11,9 @@ typedef struct {
     uint32_t begin_ret;  // return address of the framebuffer scene's sceGxmBeginScene
     uint32_t d_gl;       // the engine's GL state "G" (seg1 offset)
     uint32_t tex_units;  // G + this: the engine's bound texture objects (SceGxmTexture at +8)
+    uint32_t d_mgr;      // seg1 offset of the pointer to the render manager
+    uint32_t fbo11;      // seg0 offset of FBO 11's entry in the FBO table (+0x18/+0x1C offset in the texture)
+    uint32_t fbo11_size; // render manager + this: FBO 11's logical size (w, h), this frame's
 } sharpen_game_t;
 
 // hooks the blit at game start, if the shaders are there

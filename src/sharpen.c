@@ -9,7 +9,10 @@
  * framebuffer scene that 0x4E07CE begins (sceGxmBeginScene at 0x4E07FE).
  *
  *   - At each blit we note that texture (the engine's texture object bound to
- *     unit 0, SceGxmTexture at +8) and the image's area (the blit's UVs).
+ *     unit 0, SceGxmTexture at +8). The image's area is this frame's: FBO 11's
+ *     logical size in the render manager and its offset in the FBO table (the
+ *     blit's UVs come from the same; taking the last blit's area made a ghost of
+ *     stale pixels for a frame whenever the size grew).
  *   - When stage 4 begins the framebuffer scene, we first run a scene of our
  *     own: shaders/sharpen_f.cg reads the image (5 taps) and writes a sharpened
  *     copy into our texture of the same size, format and layout; the valid
@@ -61,6 +64,7 @@ static int s_state;   // 1 programs loaded and hooked, 2 GPU side ready too, < 0
 
 static const sharpen_game_t *s_game;
 static uint8_t *s_g;
+static uintptr_t s_seg0, s_seg1;
 static uint32_t s_blit_ret, s_begin_ret;
 static float s_amount = 1.5f, s_over = 0.25f;
 static int s_below = 640;       // sharpen only images narrower than this (a mild stretch doesn't need it)
@@ -326,10 +330,15 @@ static int pass(SceGxmContext *ctx) {
         return why(W_NOTEX, 0);
     if (!ensure_target(src))
         return 0;
-    float u0 = s_uv[0], v0 = s_uv[1], u1 = s_uv[2], v1 = s_uv[3];
+    // this frame's area: FBO 11's offset in its texture and its logical size
+    const uint8_t *mgr = *(const uint8_t *const volatile *)(s_seg1 + s_game->d_mgr);
+    if (!mgr)
+        return why(W_AREA, 0);
+    const volatile int *ent = (const volatile int *)(s_seg0 + s_game->fbo11);
+    const volatile int *sz = (const volatile int *)(mgr + s_game->fbo11_size);
     float tw = (float)s_tw, th = (float)s_th;
-    int x1 = (int)((u1 > u0 ? u1 : u0) * tw + 0.5f), y1 = (int)((v1 > v0 ? v1 : v0) * th + 0.5f);
-    int x0 = (int)((u1 > u0 ? u0 : u1) * tw + 0.5f), y0 = (int)((v1 > v0 ? v0 : v1) * th + 0.5f);
+    int x0 = ent[0x18 / 4], y0 = ent[0x1C / 4];
+    int x1 = x0 + sz[0], y1 = y0 + sz[1];
     if (x1 - x0 >= 959 || x1 - x0 >= s_below) {   // 1:1 (menus) or a mild stretch: left alone
         d_one++;
         return 0;
@@ -428,6 +437,8 @@ int sharpen_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const sharpen_gam
         return s_state;
     s_game = g;
     s_g = (uint8_t *)(seg1 + g->d_gl);
+    s_seg0 = seg0;
+    s_seg1 = seg1;
     s_blit_ret = (uint32_t)(seg0 + g->blit_ret) | 1;
     s_begin_ret = (uint32_t)(seg0 + g->begin_ret) | 1;
     s_hook = taiHookFunctionOffset(&s_ref, modid, 0, g->blit, 1, blit_hook);
