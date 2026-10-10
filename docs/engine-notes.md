@@ -224,6 +224,49 @@ Stage 3 is not the only thing that grows in heavy frames: PVGAME ctrl
 (`0x5F1B40`) grows 0.23 → 0.48 ms, in the PV script `0x3256EC` → `0x325374` →
 `0x31B346`, which runs before the ROB_BASE kick.
 
+## Render targets, the final blit, dynamic resolution (f 2nd)
+
+- **Render manager** `mgr = *0x81B62808` (static object `0x81B60E60`, getter
+  `0x25D0A0`). FBO table `0x816B2F28`: 13 entries of 0x34 bytes (+0 parent,
+  +0x10/+0x14 allocated size, +0x18/+0x1C offset in the parent, +0x20/+0x24
+  default logical size, +0x28 colour format, +0x2C depth format, +0x30 MSAA).
+  FBO objects (also the scene objects) at `mgr+0x1074+0x80*i`, colour surface
+  at +0x24, depth at +0x54, render target at +0x20; logical sizes at
+  `mgr+0x18F4+8*i`.
+- **Targets** are made once at init (`0x25D9E6` → `0x2662AC`), never again.
+  FBO 0 = the 3D world, 1024×544 F16F16F16F16 linear, 4× MSAA, DF32 depth;
+  FBO 1 = an F16 atlas 1152×768 holding FBOs 2–10 (bloom / fuzz rectangles of
+  fixed size); FBO 11 = tonemap output, 1024×544 U8U8U8U8_ABGR linear; FBO 12 =
+  the stage-2 pass, same format, drawn as the background of stage 3.
+- **The internal resolution** (default 720×408, VitaGrafix IB) is only a size:
+  `mgr+0x38/+0x3C` written every frame by the stage-0 setup `0x25E32E(mgr)`
+  (896×512 when byte +0x34 asks), and the logical sizes of FBO 0, 11, 12,
+  copied from it when the mode `mgr+0x2C` changes (0 = PV; 1 = 840×476; 2 =
+  960×544 in menus, set by `0x261E7C`). Every pass computes its UVs and
+  viewport from these when it draws; no buffer carries image data from frame
+  to frame in a way that depends on the size. So writing a new size right
+  after `0x25E32E` returns changes the resolution for that frame, with nothing
+  reallocated (`src/drs.c`).
+- **Scenes** begin through `0x266536(obj, …)` → `sceGxmBeginScene` at
+  `0x266584` with no valid region, so all 1024×544 tiles are processed.
+  Passing the image's area for FBO 0/11/12 saves only ~0.2 ms GPU at
+  720×408: the cost is in shading, not storing.
+- **Final blit:** stage 4 begins the framebuffer scene (`0x4E07CE`,
+  `sceGxmBeginScene` at `0x4E07FE`), binds FBO 11's texture
+  (`glBindTexture` `0x4E183A` → `0x4E16E4`) and draws it with the textured
+  quad `0x25E208(mgr, uv[4] = {u0, v0, u1, v1}, colour, z)` called at
+  `0x261246`: ortho(0,1,0,1), corners (0,1)↔(u0,v0) … , depth / blend / cull
+  off, one `sceGxmDraw`.
+- **Engine texture objects** (`TM + (name − 1)·0x320`, TM = `G+0x371B0`):
+  word 0 bit 1 = initialized, `SceGxmTexture` at +8, +0x30 = "bound right now"
+  (cleared on unbind). Per-unit bindings at `G+0x1217C4[unit]`, the current one
+  at `G+0x1217B4`; `0x4E185A` binds them all before a draw.
+
+Measured (Kagerou Days, AVS + OPT on): stock clocks 47.6 fps at 720×408,
+52.4 at 640×360, 59.5 at 480×272 (GPU wait 7.4 → 6.2 → 1.1 ms); dynamic
+480–720 on stock 57.1; overclocked, dynamic 480–960: 59.6 fps, average width
+576. Sharpening at 480×272: +1.7 ms GPU; RCAS on the full-screen blit: +12 ms.
+
 ## Experiments that didn't help
 
 | Experiment | Code | Result |
@@ -270,6 +313,10 @@ Stage 3 is not the only thing that grows in heavy frames: PVGAME ctrl
   addresses (a 4x4 inverse looked +0.34 ms "on the stack" with OPT on while
   its own samples went down; the vblank wait got labelled `__tls_get_addr`).
   Count samples by pc range, or by lr when it returns into the eboot.
+- GXM isn't initialized at a plugin's `module_start` (the game does it
+  later): `sceGxmMapMemory`, shader patchers and render targets made there
+  fail with `0x805B0000`. Make them on the main thread when the game draws.
+- `SceGxmValidRegion` is `{xMax, yMax}` (inclusive, from 0,0), not four values.
 - Profiles split at 18 ms are biased (every function gains about one sample
   in the 17–19 ms buckets). Classify frames by vblank count instead.
 

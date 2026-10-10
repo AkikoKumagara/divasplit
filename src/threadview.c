@@ -533,7 +533,7 @@ void tv_flush(void) {
         sceIoMkdir(SETTINGS_DIR, 0777);
         s_fd = sceIoOpen(TV_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0666);
         if (s_fd >= 0) {
-            static const char hdr[] = "# divasplit 2.0 threads\nt,kind,id,name,detail,pct\n";
+            static const char hdr[] = "# divasplit 2.1 threads\nt,kind,id,name,detail,pct\n";
             sceIoWrite(s_fd, hdr, sizeof(hdr) - 1);
         }
     }

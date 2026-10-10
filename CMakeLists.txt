@@ -97,7 +97,7 @@ unset(VITA_ELF_CREATE_FLAGS)
 unset(VITA_MAKE_FSELF_FLAGS)
 vita_create_self(eboot.bin divasplit_installer UNSAFE)
 vita_create_vpk(divasplit_installer.vpk DVSP00001 eboot.bin
-  VERSION 02.00
+  VERSION 02.10
   NAME "divasplit installer"
   FILE installer/sce_sys/icon0.png sce_sys/icon0.png
   FILE installer/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png

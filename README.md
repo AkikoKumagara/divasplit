@@ -17,6 +17,7 @@ In any other game or version the plugin stays idle.
 - **AVS (adaptive vsync).** The games wait for the next screen refresh after every frame. A frame that takes even slightly longer than 16.7 ms then waits for the refresh after that, so a small slowdown becomes a drop straight from 60 to 30 fps. AVS skips that wait only when the frame is already late. A 17 ms frame stays 17 ms (about 58 fps instead of 30). It never goes above 60 fps, and frames are still flipped on vblank, so there is no tearing.
 - **SYNC (frame-drop catch-up).** The engines have a built-in mode that scales game time by target/measured fps, so notes and animation keep real-time speed when the frame rate drops. The games never turn it on; this plugin can.
 - **Engine optimizations (OPT, f 2nd).** Faster versions of the game's hottest per-frame work that give the same output: reusing 2D uniform data that hasn't changed, a cheaper sort-key calculation, fewer copies and calls per draw. On f 2nd's heaviest PV they save **4 ms of CPU per frame on stock clocks** and 1.6 ms overclocked. See [Engine optimizations](#engine-optimizations-opt).
+- **Dynamic resolution and sharpening (f 2nd).** The 3D world's resolution follows the GPU load: full while the GPU keeps up, lower only while a heavy PV would drop, with the lowered image sharpened. On stock clocks f 2nd's heaviest PV goes from 47.6 to 57 fps; overclocked it holds 60, rendering above the game's own resolution in light moments. Off by default. See [Dynamic resolution and sharpening](#dynamic-resolution-and-sharpening-f-2nd).
 - **Split render presets.** Redraw the 3D world (PV) less often while notes and UI still redraw every frame. This trades PV smoothness for CPU and GPU time.
 - **Status bar** with fps and a per-frame timing breakdown: CPU work, waiting on the GPU, waiting for vblank, and 3D submit time.
 - **Recording.** One line per second goes to `ux0:data/divasplit/log.csv`.
@@ -73,6 +74,8 @@ Holding PS shows a *divasplit* section with these toggles:
 - AVS
 - SYNC
 - Engine optimizations (OPT, f 2nd)
+- Dynamic resolution (f 2nd)
+- Sharpen low-res 3D (f 2nd)
 - Status bar
 - Recording
 - 3D preset button
@@ -110,7 +113,7 @@ Hold **L + R**, then press:
 SPLIT OFF  SYNC OFF  AVS ON  58fps cpu 13.9 gpu 0.4 vs 2.4 3d 5.6
 ```
 
-All numbers are milliseconds per frame, averaged over one second. `REC` (or `REC+PROF` with the profiler running) shows while recording, `OPT` / `OPT A/B` when the optimizations are on.
+All numbers are milliseconds per frame, averaged over one second. `REC` (or `REC+PROF` with the profiler running) shows while recording, `OPT` / `OPT A/B` when the optimizations are on. With dynamic resolution on, `res` at the end is the 3D world's width.
 
 | Field | Meaning |
 |---|---|
@@ -142,9 +145,11 @@ A sampler thread checks the game about 1000 times a second, only while recording
 
 ## Recommended setup
 
-**AVS on and OPT on, everything else off, with the CPU and GPU overclocked** (e.g. with PSVshell). This gave the best experience in testing. AVS removes the 60 → 30 drops, OPT cuts the main thread's work, and the overclock covers most of the remaining dips. With OPT on, f 2nd's heaviest PVs are limited by the GPU, so the GPU overclock matters most.
+**AVS on, OPT on, and in f 2nd dynamic resolution on, with the CPU and GPU overclocked** (e.g. with PSVshell). This gave the best experience in testing: f 2nd's heaviest PV at 59.6 fps on average. AVS removes the 60 → 30 drops, OPT cuts the main thread's work, the overclock covers most of the remaining dips, and dynamic resolution the rest. Overclocked, set `drs_max=960` in `opt.txt` so light moments render sharper than the game's own 720×408.
 
-If you can't overclock, or a PV still drops a lot:
+Without an overclock, dynamic resolution matters most: with OPT on, f 2nd's heavy PVs are limited by the GPU.
+
+If a PV still drops a lot:
 - **A split preset** frees CPU and GPU time, but the PV redraws less smoothly. 3D 1/2 + AVS held f 2nd's heaviest PV at 59.7 fps on average.
 - **SYNC on** keeps game speed exact during dips. The trade-off is a small stutter.
 
@@ -189,7 +194,8 @@ The script lists any site it couldn't find for certain instead of guessing. A po
 | Path | Contents |
 |---|---|
 | `ux0:data/divasplit/settings.txt` | settings per game |
-| `ux0:data/divasplit/opt.txt` | optional: which [engine optimizations](#engine-optimizations-opt) OPT switches |
+| `ux0:data/divasplit/opt.txt` | optional: which [engine optimizations](#engine-optimizations-opt) OPT switches, dynamic resolution's range, sharpening strength |
+| `ux0:data/divasplit/shaders/` | optional: the sharpening shaders compiled by the installer (the plugin has the same ones built in) |
 | `ux0:data/divasplit/log.csv` | recordings (each run starts with a header line) |
 | `ux0:data/divasplit/threads.csv` | thread view, one block per second: `M` main thread state, `C` per core, `T` per thread (CPU % of one core), `W` what the main thread waits on |
 | `ux0:data/divasplit/diag.txt` | load diagnostics for the current session |
@@ -252,6 +258,28 @@ All are on by default. `ux0:data/divasplit/opt.txt` can switch single ones (`1` 
 - Overclocked with AVS off, the worst 10% of seconds went from 31.4 to 49.9 fps.
 - With AVS on, the time saved partly turns into waiting for the GPU: with OPT on, the GPU is what limits the heaviest PVs.
 - Without AVS, a frame that still takes more than 16.7 ms drops to 30 fps, which is why stock clocks with AVS off gain the least.
+
+## Dynamic resolution and sharpening (f 2nd)
+
+f 2nd draws its 3D world at 720×408 (the notes and UI at the screen's 960×544) and stretches it to the screen. With OPT on, heavy PVs are limited by the GPU, and a lower 3D resolution is what frees the most GPU time: Kagerou Days on stock clocks goes from 47.6 fps at 720×408 to 59.5 at 480×272.
+
+- **Dynamic resolution** picks the 3D resolution every frame. The game allocates its 3D buffers at 1024×544 once and only uses the resolution as a viewport size, so changing it costs nothing. When frames are late and waiting for the GPU, it steps down (more at once when the GPU is far behind). After a second with the GPU not waiting, it steps up again. A step up that has to be undone makes it wait longer before trying again, so it doesn't bounce. Menus are left alone.
+- **Sharpening** runs when the 3D image is narrower than 640: a small extra GPU pass over the image at its own resolution (an unsharp mask clamped to the neighbouring pixels, so edges get crisper without halos), just before the game stretches it. About 1.7 ms of GPU time at 480×272 on stock clocks. AMD's RCAS on the full-screen stretch was tried first: 12 ms.
+- **Valid regions** (OPT `region`): the game's 3D, tonemap and background passes are told the size of their image, so the GPU skips the unused part of the 1024×544 buffers. A small gain (about +0.5 fps at 720×408).
+
+Both are switches in the Quick Menu (per game). Dynamic resolution is off by default, sharpening on (it does nothing at the normal resolution). Settings in `opt.txt`: `drs_min=480 drs_max=720` (widths; heights keep the 960:544 shape; `drs_max` can go up to 960), `sharpness=75` (0–100), `sharpen_below=640`.
+
+**Measured** on f 2nd's heaviest PV (Kagerou Days), AVS and OPT on:
+
+| Clocks | 3D resolution | fps | worst 10% of seconds | 3D width |
+|---|---|---|---|---|
+| stock | fixed 720×408 (the game's) | 47.6 | 39.6 | 720 |
+| stock | dynamic, 480–720 | **57.1** | 52.4 | about 480 |
+| overclocked | dynamic, 480–960 | **59.6** | 59.8 | 480–960, average 576 |
+
+A lighter PV, overclocked and dynamic: 59.8 fps at an average width of 670.
+
+The sharpening shaders are built into the plugin. The installer also compiles them on the Vita when the system's shader compiler is there (`ur0:data/libshacccg.suprx`, extracted with ShaRKF00D); compiled copies in `ux0:data/divasplit/shaders/` take priority. You don't need the compiler.
 
 ## What we measured
 
@@ -328,6 +356,8 @@ cmake .. && make
 ```
 
 This produces `divasplit.suprx` (game plugin), `divasplit_qm.suprx` (Quick Menu plugin), `divasplit_prof.skprx` (profiler kernel plugin) and `divasplit_installer.vpk`.
+
+Shaders: `shaders/*.cg`. The installer compiles them on the Vita; copy the results from `ux0:data/divasplit/shaders/` to `shaders/compiled/` and run `python3 tools/gxp2h.py` to build them into the plugin.
 
 Tests that run on a PC:
 - `installer/test/test_edit.c`: the installer's file edits.

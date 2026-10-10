@@ -400,7 +400,7 @@ static void log_flush(void) {
         sceIoMkdir(LOG_DIR, 0777);
         g_log_fd = sceIoOpen(LOG_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0666);
         if (g_log_fd >= 0) {
-            static const char hdr[] = "# divasplit 2.0 recording\n"
+            static const char hdr[] = "# divasplit 2.1 recording\n"
                 "t,game,preset,sync,avs,opt,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap,"
                 "main_run,main_ready,main_wait,core0,core1,core2,core3,"
                 "up_copies,up_bytes,up_blocks,up_block_bytes,up_reused,up_reused_bytes,up_setdata,up_overflow,"
@@ -950,7 +950,7 @@ int module_start(SceSize argc, const void *args) {
     info.size = sizeof(info);
     g_start_time = sceKernelGetProcessTimeWide();
     if (taiGetModuleInfo(TAI_MAIN_MODULE, &info) < 0) {
-        diag("== divasplit 2.0: taiGetModuleInfo failed");
+        diag("== divasplit 2.1: taiGetModuleInfo failed");
         return SCE_KERNEL_START_SUCCESS;
     }
     for (int i = 0; i < GAME_COUNT; i++)
@@ -958,7 +958,7 @@ int module_start(SceSize argc, const void *args) {
             g_game = &GAMES[i];
     if (!g_game)
         return SCE_KERNEL_START_SUCCESS;   // not a build we know: do nothing
-    diag("== divasplit 2.0: %s nid %08X -> %s", info.name, (unsigned)info.module_nid, game_tag());
+    diag("== divasplit 2.1: %s nid %08X -> %s", info.name, (unsigned)info.module_nid, game_tag());
 
     // remembered settings; recording never carries over to a new session
     settings_load(&g_settings);
