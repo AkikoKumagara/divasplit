@@ -18,7 +18,8 @@
  * Controller, per frame, on the main thread's own timings: a frame is late
  * past 16.7 ms; GPU-bound when it also waited for the GPU (BeginScene /
  * EndScene / display queue). Half of 8 frames late and GPU-bound: one step
- * down at once. A second of frames on time with vblank slack and little GPU
+ * down at once, more when the GPU wait is long (fewer size changes: each one
+ * shows briefly as a ghost of the previous frames). A second of frames on time with vblank slack and little GPU
  * wait: one step up, but only after a hold that doubles each time a step up
  * is undone within two seconds (and resets after ten quiet seconds).
  */
@@ -105,8 +106,11 @@ void drs_frame(unsigned int frame_us, unsigned int gpu_us, unsigned int vs_us) {
     f_n++, f_late += late, f_gpu += gpu_us, f_vs += vs_us;
     u_n++, u_late += late, u_gpu += gpu_us, u_vs += vs_us;
     if (f_n >= 8) {
-        if (f_late >= 4 && f_gpu / f_n > GPU_BOUND_US && s_level < levels()) {
-            s_level++;
+        unsigned int gpu = f_gpu / f_n;
+        if (f_late >= 4 && gpu > GPU_BOUND_US && s_level < levels()) {
+            // a step per 4 ms of GPU wait (32 px of width is ~9% of the pixels at 720)
+            int steps = 1 + (int)(gpu / 4000);
+            s_level = s_level + steps > levels() ? levels() : s_level + steps;
             d_down++;
             if (s_since_up < 120) {   // the last step up didn't hold
                 d_undone++;

@@ -63,6 +63,7 @@ static const sharpen_game_t *s_game;
 static uint8_t *s_g;
 static uint32_t s_blit_ret, s_begin_ret;
 static float s_amount = 1.5f, s_over = 0.25f;
+static int s_below = 640;       // sharpen only images narrower than this (a mild stretch doesn't need it)
 static tai_hook_ref_t s_ref;
 static SceUID s_hook = -1;
 
@@ -329,7 +330,7 @@ static int pass(SceGxmContext *ctx) {
     float tw = (float)s_tw, th = (float)s_th;
     int x1 = (int)((u1 > u0 ? u1 : u0) * tw + 0.5f), y1 = (int)((v1 > v0 ? v1 : v0) * th + 0.5f);
     int x0 = (int)((u1 > u0 ? u0 : u1) * tw + 0.5f), y0 = (int)((v1 > v0 ? v0 : v1) * th + 0.5f);
-    if (x1 - x0 >= 959) {   // drawn 1:1 (menus): nothing to sharpen
+    if (x1 - x0 >= 959 || x1 - x0 >= s_below) {   // 1:1 (menus) or a mild stretch: left alone
         d_one++;
         return 0;
     }
@@ -465,14 +466,18 @@ void sharpen_shutdown(void) {
     s_state = 0;
 }
 
+void sharpen_set_below(int width) {
+    s_below = width < 16 ? 16 : width > 960 ? 960 : width;
+}
+
 void sharpen_set_strength(int percent) {
     // 0..100 -> unsharp amount 0..2
     s_amount = (percent < 0 ? 0 : percent > 100 ? 100 : percent) / 50.0f;
 }
 
 int sharpen_diag(char *buf, int size) {
-    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X amount %d%%; passes %u swaps %u 1:1 %u bad %u"
+    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X amount %d%% below %d; passes %u swaps %u wide %u bad %u"
             " (step %d err %08X; image %ux%u fmt %08X type %08X)",
-            s_state, s_hook, (int)(s_amount * 50.0f + 0.5f), d_passes, d_swaps, d_one, d_bad,
+            s_state, s_hook, (int)(s_amount * 50.0f + 0.5f), s_below, d_passes, d_swaps, d_one, d_bad,
             s_why, (unsigned)s_why_err, s_src_w, s_src_h, s_src_fmt, s_src_type);
 }

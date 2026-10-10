@@ -18,6 +18,7 @@ typedef struct {
 int sharpen_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const sharpen_game_t *g);
 void sharpen_shutdown(void);
 void sharpen_set_strength(int percent);   // 0..100
+void sharpen_set_below(int width);        // sharpen only 3D images narrower than this
 // main.c's sceGxmBeginScene hook, before the game's call: runs our pass when
 // it is the framebuffer scene of stage 4 (returns 1 if it did)
 int sharpen_before_scene(void *ctx, uint32_t ret_addr, int stage);

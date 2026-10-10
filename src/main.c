@@ -746,6 +746,10 @@ static void opt_file_load(void) {
             settings_get_int(buf, buf + len, "drs_max", &hi);
         }
         drs_set_range(lo, hi);
+        int below = 640;
+        if (len > 0)
+            settings_get_int(buf, buf + len, "sharpen_below", &below);
+        sharpen_set_below(below);
         if (len > 0 && settings_get_int(buf, buf + len, "sharpness", &v)) {
             static int last = -1;
             if (v != last) {
