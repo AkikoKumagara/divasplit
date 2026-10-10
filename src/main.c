@@ -218,7 +218,7 @@ static const opt_r2_t F_R2 = {
     .mat_get = 0x3D70B6,
     .mat = {0x3D7E4E, F_MAT_ORIG, 16, F_G_HEAD, 2, MAT_TAIL},
     .mvp = {0x3D7924, F_MVP_ORIG, 16, F_G_HEAD, 2, F_MVP_TAIL},
-    .transpose = 0x3CE20C, .stub_set_vp = 0x5AA5E8, .d_gl = 0x2FC6B8,
+    .transpose = 0x3CE20C, .dsc_trace = 0x405D3A, .stub_set_vp = 0x5AA5E8, .d_gl = 0x2FC6B8,
     .u = {.t = 0x2EA88, .f = 0x2FDD8, .rec = 0x364, .rec_vprog = 0x2C, .rec_entries = 0x30, .rec_count = 0x1B0,
           .rec_frag = 0x1B4, .mv = 0x55C, .p = 0x570, .dprog = 0x6E8, .dtex = 0x5A8, .mat_src = 0x30A6C,
           .mat_t = 0x2FD48, .mat_f = 0x30418, .mat_arg = 0x305E8, .mvp_t = 0x1310, .mvp_dup = 0x1000,
@@ -226,7 +226,9 @@ static const opt_r2_t F_R2 = {
 };
 static const opt_cuts_t F_CUTS = {
     .mul44 = 0x3CCB02, .inv44 = 0x3CC704, .xform = 0x3CE08E,
-    .dirty_loop = 0x3D7F38, .dirty_orig = F_DIRTY_ORIG, .dirty_len = 24, .r2 = &F_R2,
+    .dirty_loop = 0x3D7F38, .dirty_orig = F_DIRTY_ORIG, .dirty_len = 24,
+    .list_sort = 0x4F792C,   // the same Dinkumware 25-bin sort (with operator new for its heads)
+    .r2 = &F_R2,
 };
 
 // the final blit of the 3D image and the framebuffer scene's begin (sharpen.c); the GL
