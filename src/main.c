@@ -237,7 +237,7 @@ static const opt_cuts_t F_CUTS = {
 // state and its bound texture units
 static const sharpen_game_t F2ND_SHARPEN = {.blit = 0x25E208, .blit_ret = 0x26124A, .begin_ret = 0x4E0802, .stage = 4,
         .d_gl = 0x6032A8, .tex_units = 0x1217C4, .d_mgr = 0x447808, .fbo11 = 0x6B3164, .fbo11_size = 0x194C,
-        .below = 960};
+        .below = 640};   // only when dynamic resolution (or VitaGrafix IB) lowers it: felt better than always
 
 // the render manager's per-frame setup, which writes the 3D size (drs.c)
 static const drs_game_t F2ND_DRS = {.stage0 = 0x25E32E, .scene_ret = 0x266588, .d_mgr = 0x447808,
