@@ -187,7 +187,8 @@ Validation run (2026-10-10, 3 songs, `check=1`, first 3 minutes in diag.txt):
 (its gate, no PvOsageManager slot busy or ready, apparently never opened), so
 `earlykick` is parked. `h2f` didn't go in: the check of its original bytes
 included the movw/movt of the stack-canary address, which the loader fills in
-(not seg0-relative either); now only their shape is checked.
+(not seg0-relative either); now only their shape is checked, and with that
+it goes in (2026-10-10: patch id set, self-test passed after patching).
 
 Timing run (2026-10-10, f 2nd heavy PV, AVS off, A/B, 200 windows): frame time
 −2.32 ± 0.34 ms, cpu −1.57; stage 5 2.26 → 1.14 ms, stage 3 −0.77, stage 4
