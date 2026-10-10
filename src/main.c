@@ -220,7 +220,7 @@ static const opt_r2_t F_R2 = {
     .mvp = {0x3D7924, F_MVP_ORIG, 16, F_G_HEAD, 2, F_MVP_TAIL},
     .transpose = 0x3CE20C, .dsc_trace = 0x405D3A, .stub_set_vp = 0x5AA5E8, .d_gl = 0x2FC6B8,
     // 3D draw-list nodes (12 bytes) and 2D sprite nodes (0xE0): pools (opt.c "alloc")
-    .alloc_size = {12, 0xE0}, .alloc_count = {8192, 2048},
+    .alloc_size = {12, 0xE0}, .alloc_count = {16384, 512},   // boot keeps ~6000 small nodes; sprites peak ~200
     .u = {.t = 0x2EA88, .f = 0x2FDD8, .rec = 0x364, .rec_vprog = 0x2C, .rec_entries = 0x30, .rec_count = 0x1B0,
           .rec_frag = 0x1B4, .mv = 0x55C, .p = 0x570, .dprog = 0x6E8, .dtex = 0x5A8, .mat_src = 0x30A6C,
           .mat_t = 0x2FD48, .mat_f = 0x30418, .mat_arg = 0x305E8, .mvp_t = 0x1310, .mvp_dup = 0x1000,
