@@ -1,6 +1,6 @@
 /*
- * Light anti-aliasing of the 3D image at its own resolution, before the game
- * stretches it (where it isn't sharpened: 640 wide and up). FXAA's console
+ * Light anti-aliasing of the 3D image at its own resolution, before it is
+ * sharpened (cas_f.cg) and the game stretches it: below 640 wide. FXAA's console
  * variant (after Timothy Lottes' FXAA 3.11): luma at the 4 corners (one
  * bilinear read each covers 2x2 texels) and the centre; where the contrast is
  * an edge, 2 reads along it (and 2 further out, unless they cross another
