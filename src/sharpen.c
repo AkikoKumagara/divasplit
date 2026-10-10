@@ -1,5 +1,5 @@
 /*
- * Sharpening (f 2nd): the 3D image, at its own resolution, just before the
+ * Sharpening (f, f 2nd): the 3D image, at its own resolution, just before the
  * game stretches it to the screen. Lowering the 3D resolution (VitaGrafix IB)
  * frees most of the GPU time a heavy PV needs; this brings back some detail.
  *

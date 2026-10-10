@@ -1,5 +1,5 @@
 /*
- * Dynamic resolution (f 2nd): the 3D world's resolution follows the GPU load,
+ * Dynamic resolution (f, f 2nd): the 3D world's resolution follows the GPU load,
  * full size while the GPU keeps up, lower only while a heavy PV would drop.
  *
  * The engine allocates its 3D render targets at 1024x544 once; the internal

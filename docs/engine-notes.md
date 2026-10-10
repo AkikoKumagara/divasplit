@@ -1,4 +1,4 @@
-# Engine notes (Project DIVA f 2nd EU 1.00)
+# Engine notes (Project DIVA f 2nd EU 1.00, and f EU 1.00)
 
 What reverse engineering and profiling found so far, for the next round of
 optimization work. Addresses are seg0 offsets of the decrypted eboot
@@ -266,6 +266,60 @@ Measured (Kagerou Days, AVS + OPT on): stock clocks 47.6 fps at 720×408,
 52.4 at 640×360, 59.5 at 480×272 (GPU wait 7.4 → 6.2 → 1.1 ms); dynamic
 480–720 on stock 57.1; overclocked, dynamic 480–960: 59.6 fps, average width
 576. Sharpening at 480×272: +1.7 ms GPU; RCAS on the full-screen blit: +12 ms.
+CAS's weighting (`shaders/cas_f.cg`, the default style since 2.2) costs the
+same as the unsharp mask (5 reads). FXAA before it, at 480×272: GPU wait 4.9
+→ 6.8–9.7 ms, 55.8 → 48 fps; dropped. With the GPU that far behind (40–48
+fps) the hair physics looked rigid; at ~56 fps normal again (not looked into).
+
+The GPU-wait floor (driver work in the GXM calls when the GPU keeps up) is
+~0.6 ms a frame here; dynamic resolution measures waits above it.
+
+## DIVA f (PCSB00419 EU 1.00)
+
+f's engine is the same family as f 2nd's; most functions have a twin
+(`logs/re-kit/fmatch.py` matches them by instruction 3-grams). seg1 links at
+`0x81689000`; G = seg1+`0x2FC6B8`.
+
+**OPT.** Uniform tables T = G+`0x2EA88`, F = G+`0x2FDD8`, program records
+0x364 bytes; one matrix context at G (no TLS index); the 2D draws upload
+through `sceGxmSetUniformDataF` (`opt_ulayout_t.setdata`). Ported: `ureuse`
+(predraw `0x3D805C`), `dirty` (`0x3D7F38`, a 24-byte patch), `lsort`
+(`0x4F792C`, the same 25-bin sort), `matdup` (`0x3D7E4E`, `0x3D7924`),
+`nolog` (`0x405D3A`). Not ported: `centre`, `palette`, `texwrap`, `keyset`,
+`h2f`. f only: `alloc`, pools for the main thread's 12-byte draw-list nodes
+(~6000 live from boot, so 16384 slots) and 224-byte sprite nodes (peak 203,
+512 slots), through hooks on SceLibstdcxx `operator new` / `delete`
+(`delete` from any thread returns pool slots, lock-free). The RobThread jobs
+are kicked and joined back to back, on the critical path. On stock clocks f
+is mostly CPU-bound.
+
+**Rendering.** `RenderStage` `0x28C54E`, 14 stages. Render manager
+`mgr = *(seg1+0x26FB6C)` (static object `0x818F45E8`). Differences from f 2nd:
+
+- One size for everything: `mgr+0x30/+0x34` (640×352 stock, 20:11), written
+  every frame by `0x2828BE(mgr)` in stage 5 (896×512 when byte `+0x2C` asks,
+  cleared there); every pass reads it when it draws (stages 7, 8, 10). No PV
+  mode, no per-FBO logical sizes. VitaGrafix's IB patch sits inside
+  `0x2828BE` (`0x2828C4/0x2828CA`), so a hook there would collide: the plugin
+  writes its size after `RenderStage(5)` returns (`drs_stage`).
+- FBO table `0x64E08C`, 6 entries × 0x14 {w, h, colour fmt, depth fmt, MSAA}:
+  FBO 0 the 3D world 1024×512 (MSAA setting 2, 4×), 1–3 bloom, 4 the tonemap
+  output 1024×512 U8, 5 the stage-2 background. Targets are 512 high: the 3D
+  height must stay ≤ 512 (896×492 at most at 20:11). Scene objects at
+  `mgr+0x304+0x74*i` (colour surface +0x24), begun by `0x28D312`
+  (`sceGxmBeginScene` returns to `0x28D364`).
+- Final blit `0x283B48`, stage 10: composite (FBO 4), movie copies, the
+  framebuffer scene (`0x3D95BE(0)`, `sceGxmBeginScene` returns to
+  `0x3D95F2`), `glBindTexture` of FBO 4's texture, then the quad `0x28260C`
+  called at `0x283CCE` with uv {0, 0, w/1024, h/512} (the image is always at
+  0,0).
+- `glBindTexture` (`0x3DA7E6`) calls `sceGxmSetFragmentTexture` at once
+  (`0x3DA8A8`); there is no bind-all-before-draw like f 2nd's `0x4E185A`. So
+  the sharpened texture is set on GXM directly around the blit, then the
+  engine's again. Bound objects: `G+0x1225DC[unit]`, objects at
+  `G+0x36D08+(name−1)·0x324`.
+- GPU-wait floor ~1 ms a frame (7+ scenes of driver work), the same at 640
+  and 448: the controller's thresholds are relative to it.
 
 ## Experiments that didn't help
 
@@ -317,6 +371,11 @@ Measured (Kagerou Days, AVS + OPT on): stock clocks 47.6 fps at 720×408,
   later): `sceGxmMapMemory`, shader patchers and render targets made there
   fail with `0x805B0000`. Make them on the main thread when the game draws.
 - `SceGxmValidRegion` is `{xMax, yMax}` (inclusive, from 0,0), not four values.
+- A render target made with `scenesPerFrame = 1` but used for two scenes a
+  frame: beginning the second waits for the GPU to finish the first. Here
+  that blocked the main thread ~20 ms a frame (fps halved) while the GPU-wait
+  timing showed nothing, because the plugin's own GXM calls don't go through
+  the game's hooked imports. Time them explicitly.
 - Profiles split at 18 ms are biased (every function gains about one sample
   in the 17–19 ms buckets). Classify frames by vblank count instead.
 

@@ -16,8 +16,8 @@ In any other game or version the plugin stays idle.
 
 - **AVS (adaptive vsync).** The games wait for the next screen refresh after every frame. A frame that takes even slightly longer than 16.7 ms then waits for the refresh after that, so a small slowdown becomes a drop straight from 60 to 30 fps. AVS skips that wait only when the frame is already late. A 17 ms frame stays 17 ms (about 58 fps instead of 30). It never goes above 60 fps, and frames are still flipped on vblank, so there is no tearing.
 - **SYNC (frame-drop catch-up).** The engines have a built-in mode that scales game time by target/measured fps, so notes and animation keep real-time speed when the frame rate drops. The games never turn it on; this plugin can.
-- **Engine optimizations (OPT, f 2nd).** Faster versions of the game's hottest per-frame work that give the same output: reusing 2D uniform data that hasn't changed, a cheaper sort-key calculation, fewer copies and calls per draw. On f 2nd's heaviest PV they save **4 ms of CPU per frame on stock clocks** and 1.6 ms overclocked. See [Engine optimizations](#engine-optimizations-opt).
-- **Dynamic resolution and sharpening (f 2nd).** The 3D world's resolution follows the GPU load: full while the GPU keeps up, lower only while a heavy PV would drop, with the lowered image sharpened. On stock clocks f 2nd's heaviest PV goes from 47.6 to 57 fps; overclocked it holds 60, rendering above the game's own resolution in light moments. Off by default. See [Dynamic resolution and sharpening](#dynamic-resolution-and-sharpening-f-2nd).
+- **Engine optimizations (OPT, f and f 2nd).** Faster versions of the game's hottest per-frame work that give the same output: reusing 2D uniform data that hasn't changed, a cheaper sort-key calculation, fewer copies and calls per draw. On f 2nd's heaviest PV they save **4 ms of CPU per frame on stock clocks** and 1.6 ms overclocked; in f, +2 to +3 fps in heavy PVs. See [Engine optimizations](#engine-optimizations-opt).
+- **Dynamic resolution and sharpening (f and f 2nd).** The 3D world's resolution follows the GPU load: full while the GPU keeps up, lower only while a heavy PV would drop, with the lowered image sharpened (contrast-adaptive, after AMD's CAS). On stock clocks f 2nd's heaviest PV goes from 47.6 to 57 fps; overclocked it holds 60, rendering above the game's own resolution in light moments. Off by default. See [Dynamic resolution and sharpening](#dynamic-resolution-and-sharpening-f-and-f-2nd).
 - **Split render presets.** Redraw the 3D world (PV) less often while notes and UI still redraw every frame. This trades PV smoothness for CPU and GPU time.
 - **Status bar** with fps and a per-frame timing breakdown: CPU work, waiting on the GPU, waiting for vblank, and 3D submit time.
 - **Recording.** One line per second goes to `ux0:data/divasplit/log.csv`.
@@ -73,12 +73,13 @@ Holding PS shows a *divasplit* section with these toggles:
 
 - AVS
 - SYNC
-- Engine optimizations (OPT, f 2nd)
-- Dynamic resolution (f 2nd)
-- Sharpen low-res 3D (f 2nd)
+- Engine optimizations (OPT, f and f 2nd)
+- Dynamic resolution (f and f 2nd)
+- Sharpen 3D image (f and f 2nd)
 - Status bar
 - Recording
 - 3D preset button
+- Sharpening style button: adaptive or classic
 
 They apply to the DIVA game that started last, and take effect in the running game within half a second.
 
@@ -145,9 +146,9 @@ A sampler thread checks the game about 1000 times a second, only while recording
 
 ## Recommended setup
 
-**AVS on, OPT on, and in f 2nd dynamic resolution on, with the CPU and GPU overclocked** (e.g. with PSVshell). This gave the best experience in testing: f 2nd's heaviest PV at 59.6 fps on average. AVS removes the 60 → 30 drops, OPT cuts the main thread's work, the overclock covers most of the remaining dips, and dynamic resolution the rest. Overclocked, set `drs_max=960` in `opt.txt` so light moments render sharper than the game's own 720×408.
+**AVS on, OPT on, and in f and f 2nd dynamic resolution on, with the CPU and GPU overclocked** (e.g. with PSVshell). This gave the best experience in testing: f 2nd's heaviest PV at 59.6 fps on average. AVS removes the 60 → 30 drops, OPT cuts the main thread's work, the overclock covers most of the remaining dips, and dynamic resolution the rest. Overclocked, set `drs_max=960` in `opt.txt` so light moments render sharper than the game's own resolution (f stops at 896).
 
-Without an overclock, dynamic resolution matters most: with OPT on, f 2nd's heavy PVs are limited by the GPU.
+Without an overclock, dynamic resolution matters most in f 2nd: with OPT on, its heavy PVs are limited by the GPU. f is mostly limited by the CPU; dynamic resolution covers its GPU-heavy moments.
 
 If a PV still drops a lot:
 - **A split preset** frees CPU and GPU time, but the PV redraws less smoothly. 3D 1/2 + AVS held f 2nd's heaviest PV at 59.7 fps on average.
@@ -194,7 +195,7 @@ The script lists any site it couldn't find for certain instead of guessing. A po
 | Path | Contents |
 |---|---|
 | `ux0:data/divasplit/settings.txt` | settings per game |
-| `ux0:data/divasplit/opt.txt` | optional: which [engine optimizations](#engine-optimizations-opt) OPT switches, dynamic resolution's range, sharpening strength |
+| `ux0:data/divasplit/opt.txt` | optional: which [engine optimizations](#engine-optimizations-opt) OPT switches, dynamic resolution's range, sharpening strength and threshold |
 | `ux0:data/divasplit/shaders/` | optional: the sharpening shaders compiled by the installer (the plugin has the same ones built in) |
 | `ux0:data/divasplit/log.csv` | recordings (each run starts with a header line) |
 | `ux0:data/divasplit/threads.csv` | thread view, one block per second: `M` main thread state, `C` per core, `T` per thread (CPU % of one core), `W` what the main thread waits on |
@@ -229,20 +230,21 @@ Profiler times for code in the plugin itself can be misattributed: its stack sca
 
 ## Engine optimizations (OPT)
 
-f 2nd EU 1.00 only. Each one replaces a piece of the game's per-frame work with a faster version that gives the same result. That was checked against the game's own code on a PC and with self-checks on the console. They were found with the profiler and measured with A/B recordings.
+f 2nd EU 1.00, and the ones marked *f* for f EU 1.00 too (the two engines are close relatives; X has none). Each one replaces a piece of the game's per-frame work with a faster version that gives the same result. That was checked against the game's own code on a PC and with self-checks on the console. They were found with the profiler and measured with A/B recordings.
 
-| Key in `opt.txt` | What it does |
-|---|---|
-| `ureuse` | 2D draws (notes, UI, lyrics) upload a 4.9 KB block of shader constants each, and almost all of them are identical to the previous one. The engine already marks every change to that data, so when nothing changed the draw points at the block uploaded last time instead of copying it again. Cuts the notes/UI stage in half. |
-| `centre` | The 3D sort keys average each character's position over all its bones with two matrix products per bone. Summing the bones first needs only two products in total. |
-| `dirty` | Every draw clears 224 change flags one byte at a time; one `memset` instead. |
-| `lsort` | Sorting the draw lists allocates and frees 27 list heads from a locked heap every call; a merge sort that needs no allocation, with the same order. |
-| `matdup` | Per draw, ten tiny getter calls copy material colours, and a matrix product is computed twice; plain copies instead. |
-| `palette` | Bone matrices go to the shader constants with three function calls per bone; plain copies instead. |
-| `texwrap` | Texture wrap modes go through a three-level generic dispatch; the same writes, directly. |
-| `keyset` | The character threads' animation curve evaluation, with its inner calls inlined (same instructions, same results). |
-| `h2f` | Half → float conversion without its stack-guard overhead (checked for all 65,536 inputs at start). |
-| `nolog` | The PV script player formats a debug line for every command into a buffer nothing reads; skipped. |
+| Key in `opt.txt` | Games | What it does |
+|---|---|---|
+| `ureuse` | f 2nd, f | 2D draws (notes, UI, lyrics) upload a 4.9 KB block of shader constants each, and almost all of them are identical to the previous one. The engine already marks every change to that data, so when nothing changed the draw points at the block uploaded last time instead of copying it again. Cuts the notes/UI stage in half. |
+| `centre` | f 2nd | The 3D sort keys average each character's position over all its bones with two matrix products per bone. Summing the bones first needs only two products in total. |
+| `dirty` | f 2nd, f | Every draw clears 224 change flags one byte at a time; one `memset` instead. |
+| `lsort` | f 2nd, f | Sorting the draw lists allocates and frees 27 list heads from a locked heap every call; a merge sort that needs no allocation, with the same order. |
+| `matdup` | f 2nd, f | Per draw, ten tiny getter calls copy material colours, and a matrix product is computed twice; plain copies instead. |
+| `palette` | f 2nd | Bone matrices go to the shader constants with three function calls per bone; plain copies instead. |
+| `texwrap` | f 2nd | Texture wrap modes go through a three-level generic dispatch; the same writes, directly. |
+| `keyset` | f 2nd | The character threads' animation curve evaluation, with its inner calls inlined (same instructions, same results). |
+| `h2f` | f 2nd | Half → float conversion without its stack-guard overhead (checked for all 65,536 inputs at start). |
+| `nolog` | f 2nd, f | The PV script player formats a debug line for every command into a buffer nothing reads; skipped. |
+| `alloc` | f | Every frame, f allocates and frees thousands of 12-byte draw-list nodes and a few hundred 224-byte sprite nodes from the C++ heap, with a lock each; the main thread's ones come from two preallocated pools instead. |
 
 All are on by default. `ux0:data/divasplit/opt.txt` can switch single ones (`1` on, `0` off, `2` = on and the only one OPT A/B compares). It is re-read every 2 seconds; `h2f` and `nolog` only at game start. `check=1` makes `ureuse` and `centre` compare every result with the game's own (slow, for testing). `nosort0=1` skips sorting the opaque 3D list (changes draw order, off by default).
 
@@ -259,15 +261,27 @@ All are on by default. `ux0:data/divasplit/opt.txt` can switch single ones (`1` 
 - With AVS on, the time saved partly turns into waiting for the GPU: with OPT on, the GPU is what limits the heaviest PVs.
 - Without AVS, a frame that still takes more than 16.7 ms drops to 30 fps, which is why stock clocks with AVS off gain the least.
 
-## Dynamic resolution and sharpening (f 2nd)
+**Measured in f**, OPT A/B with AVS on, about 200 paired seconds each:
 
-f 2nd draws its 3D world at 720×408 (the notes and UI at the screen's 960×544) and stretches it to the screen. With OPT on, heavy PVs are limited by the GPU, and a lower 3D resolution is what frees the most GPU time: Kagerou Days on stock clocks goes from 47.6 fps at 720×408 to 59.5 at 480×272.
+| PV | fps, OPT off → on | Main-thread CPU per frame, off → on |
+|---|---|---|
+| DYE | 52.7 → **55.8** | 17.9 → 16.7 ms |
+| Fire Flower | 54.3 → **56.3** | 16.5 → 14.2 ms |
 
-- **Dynamic resolution** picks the 3D resolution every frame. The game allocates its 3D buffers at 1024×544 once and only uses the resolution as a viewport size, so changing it costs nothing. When frames are late and waiting for the GPU, it steps down (more at once when the GPU is far behind). After a second with the GPU not waiting, it steps up again. A step up that has to be undone makes it wait longer before trying again, so it doesn't bounce. Menus are left alone.
-- **Sharpening** runs when the 3D image is narrower than 640: a small extra GPU pass over the image at its own resolution (an unsharp mask clamped to the neighbouring pixels, so edges get crisper without halos), just before the game stretches it. About 1.7 ms of GPU time at 480×272 on stock clocks. AMD's RCAS on the full-screen stretch was tried first: 12 ms.
-- **Valid regions** (OPT `region`): the game's 3D, tonemap and background passes are told the size of their image, so the GPU skips the unused part of the 1024×544 buffers. A small gain (about +0.5 fps at 720×408).
+The `alloc` pools alone, in DYE: +0.6 fps (±0.4).
 
-Both are switches in the Quick Menu (per game). Dynamic resolution is off by default, sharpening on (it does nothing at the normal resolution). Settings in `opt.txt`: `drs_min=480 drs_max=720` (widths; heights keep the 960:544 shape; `drs_max` can go up to 960), `sharpness=75` (0–100), `sharpen_below=640`.
+## Dynamic resolution and sharpening (f and f 2nd)
+
+Both games draw their 3D world below the screen's resolution and stretch it to the screen: f 2nd at 720×408, f at 640×352 (the notes and UI at the screen's 960×544). With OPT on, f 2nd's heavy PVs are limited by the GPU, and a lower 3D resolution is what frees the most GPU time: Kagerou Days on stock clocks goes from 47.6 fps at 720×408 to 59.5 at 480×272. f is mostly limited by the CPU, with GPU-heavy moments.
+
+- **Dynamic resolution** picks the 3D resolution every frame. The games allocate their 3D buffers once (f 2nd 1024×544, f 1024×512) and only use the resolution as a viewport size, so changing it costs nothing. When frames are late and the main thread waits for the GPU clearly longer than it does when the GPU keeps up (each game has its own floor of driver work: about 1 ms a frame in f), it steps down (more at once when the GPU is far behind). After a second with the GPU not waiting, it steps up again. A step up that has to be undone makes it wait longer before trying again, so it doesn't bounce. In f 2nd menus are left alone; f has no PV flag, so it works there too.
+- **Sharpening** runs when the 3D image is narrower than 640 (both games: only when dynamic resolution lowered it): a small extra GPU pass over the image at its own resolution, just before the game stretches it. The default style, *adaptive*, follows AMD's CAS (contrast-adaptive sharpening): it sharpens soft detail and holds back on edges that already have contrast, so stair-steps don't get crunchy. *Classic* is an unsharp mask clamped to the neighbouring pixels. The lower the resolution, the stronger it gets (×1.1 at 480 wide). About 1.7 ms of GPU time at 480×272 on stock clocks.
+- **Valid regions** (OPT `region`): the game's 3D, tonemap and background passes are told the size of their image, so the GPU skips the unused part of the buffers. A small gain (about +0.5 fps at 720×408).
+
+Dynamic resolution and sharpening are switches in the Quick Menu (per game), plus a button for the sharpening style. Dynamic resolution is off by default, sharpening on (it does nothing at the normal resolution). Settings in `opt.txt`:
+
+- `drs_min=0 drs_max=0`: the range of widths, 0 for the game's own (f 2nd 480–720, f 448–640). Heights keep the game's shape. `drs_max` goes up to 960 in f 2nd and 896 in f.
+- `sharpness=75` (0–100) and `sharpen_below=640` (0 for the game's own).
 
 **Measured** on f 2nd's heaviest PV (Kagerou Days), AVS and OPT on:
 
@@ -277,9 +291,11 @@ Both are switches in the Quick Menu (per game). Dynamic resolution is off by def
 | stock | dynamic, 480–720 | **57.1** | 52.4 | about 480 |
 | overclocked | dynamic, 480–960 | **59.6** | 59.8 | 480–960, average 576 |
 
-A lighter PV, overclocked and dynamic: 59.8 fps at an average width of 670.
+A lighter PV, overclocked and dynamic: 59.8 fps at an average width of 670. In f, dynamic resolution is not measured with an A/B yet.
 
-The sharpening shaders are built into the plugin. The installer also compiles them on the Vita when the system's shader compiler is there (`ur0:data/libshacccg.suprx`, extracted with ShaRKF00D); compiled copies in `ux0:data/divasplit/shaders/` take priority. You don't need the compiler.
+Tried and dropped: AMD's RCAS on the full-screen stretch (12 ms of GPU time a frame on stock clocks), two adaptive passes (looked "deep fried"), and FXAA before the sharpening (it looked good, but cost 8 fps in a heavy PV at 480 on stock clocks; the game's 3D is already 4× MSAA).
+
+The shaders are built into the plugin. The installer also compiles them on the Vita when the system's shader compiler is there (`ur0:data/libshacccg.suprx`, extracted with ShaRKF00D); compiled copies in `ux0:data/divasplit/shaders/` take priority. You don't need the compiler.
 
 ## What we measured
 
@@ -369,3 +385,4 @@ Tests that run on a PC:
 - Font: Terminus Font 8×14 bold, by Dimitar Toshkov Zhekov (SIL Open Font License 1.1). The bitmap header comes from Electry's PSVshell.
 - Quick Menu: [QuickMenuReborn](https://github.com/Ibrahim778/QuickMenuReborn) by Ibrahim778 (MIT). Its headers and stub library are included in `qm/`.
 - VitaGrafix and its patchlist, by Electry and contributors.
+- Adaptive sharpening: the weighting of [AMD FidelityFX CAS](https://github.com/GPUOpen-Effects/FidelityFX-CAS) (MIT), reimplemented in `shaders/cas_f.cg`.

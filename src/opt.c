@@ -399,7 +399,7 @@ static void *dirty_clear(void *p, int c, unsigned int n) {
 }
 
 /* ---------------------------------------------------------------------------
- * Round 2 (f 2nd only; offsets in main.c F2ND_R2, docs/engine-notes.md).
+ * Round 2 (f 2nd, and f where F_R2 has the address; offsets in main.c, docs/engine-notes.md).
  *
  *   ureuse  2D draws: the per-draw uniform setup (seg0+0x4DF052: MVP, flush
  *           0x4DEF04, vertex binding 0x4DE828) rebuilds and uploads the same
