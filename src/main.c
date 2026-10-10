@@ -627,8 +627,12 @@ static int render_stage_hook(int stage) {
 static int begin_scene_hook(void *ctx, unsigned int flags, const void *rt, const void *region,
         void *vsync, void *fsync, const void *color, const void *depth) {
     uint32_t ra = (uint32_t)__builtin_return_address(0);
-    if (g_game && g_game->sharpen)   // its own scene first, when this is stage 4's framebuffer scene
-        sharpen_before_scene(ctx, ra, g_cur_stage);
+    if (g_game && g_game->sharpen) {   // its own scenes first, when this is the framebuffer scene
+        // timed like the game's GXM calls: a wait in our scenes is GPU time (dynamic resolution)
+        uint64_t s0 = sceKernelGetProcessTimeWide();
+        if (sharpen_before_scene(ctx, ra, g_cur_stage))
+            g_gpu_total += sceKernelGetProcessTimeWide() - s0;
+    }
     SceGxmValidRegion vr;   // only the image's area of the 3D, tonemap and stage-2 targets
     if (g_game && g_game->drs && !region && drs_scene_region(ra, color, &vr.xMax, &vr.yMax))
         region = &vr;

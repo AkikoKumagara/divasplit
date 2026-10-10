@@ -332,7 +332,9 @@ static int make_target(const SceGxmTexture *src) {
     sceClibMemset(&rp, 0, sizeof(rp));
     rp.width = (uint16_t)w;
     rp.height = (uint16_t)h;
-    rp.scenesPerFrame = 1;
+    // two scenes a frame (adaptive + AA): with 1, beginning the second waited for the
+    // GPU to finish the first, ~20 ms of the main thread a frame (and the fps halved)
+    rp.scenesPerFrame = 2;
     rp.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
     unsigned int dsize = 0;
     if ((r = sceGxmGetRenderTargetMemSize(&rp, &dsize)) < 0)
@@ -441,9 +443,10 @@ static int pass(SceGxmContext *ctx) {
     SceGxmValidRegion vr = {(unsigned int)x1 - 1, (unsigned int)y1 - 1};   // from (0, 0): the image's corner
     float w = (float)(x1 - x0), h = (float)(y1 - y0);
     // the more the image is stretched, the more it needs: the setting up to 1.5x
-    // (f's stock 640, a mild stretch), x1.2 at 2x (480), at most x1.3
-    float boost = 1.0f + 0.4f * (960.0f / w - 1.5f);
-    boost = boost < 1.0f ? 1.0f : boost > 1.3f ? 1.3f : boost;
+    // (f's stock 640, a mild stretch), x1.1 at 2x (480), at most x1.15 (x1.2 at 480
+    // and x1.3 looked oversharpened at 448..480)
+    float boost = 1.0f + 0.2f * (960.0f / w - 1.5f);
+    boost = boost < 1.0f ? 1.0f : boost > 1.15f ? 1.15f : boost;
     float amount = s_amount * boost;
     s_last_amount = amount;
     // classic: the unsharp amount (0..2.6) and overshoot; adaptive: CAS's peak weight
