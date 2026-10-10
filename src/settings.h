@@ -46,7 +46,7 @@ static const preset_t PRESETS[] = {
 typedef struct {
     int preset, sync, avs, bar, rec, opt;
     int drs, sharp;   // dynamic resolution, sharpening of the 3D image (f, f 2nd)
-    int style;        // sharpening: 0 adaptive, 1 classic, 2 adaptive x2 (two passes)
+    int style;        // sharpening: 0 adaptive, 1 classic, 2 adaptive + AA (FXAA at 640 and up)
 } game_settings_t;
 
 typedef struct {
@@ -66,7 +66,7 @@ static inline void settings_defaults(settings_t *s) {
         s->game[i].opt = sceClibStrncmp(SETTINGS_GAME_TAG[i], "F2ND", 5) == 0
                 || sceClibStrncmp(SETTINGS_GAME_TAG[i], "F", 2) == 0;
         s->game[i].drs = 0;     // lowers the resolution: asked for, not by default
-        s->game[i].sharp = 1;   // f: whenever stretched; f 2nd: below 640 wide (stronger the lower)
+        s->game[i].sharp = 1;   // below 640 wide (stronger the lower)
         s->game[i].style = 0;   // adaptive
     }
 }

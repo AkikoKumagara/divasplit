@@ -16,7 +16,7 @@ typedef struct {
     uint32_t d_mgr;      // seg1 offset of the pointer to the render manager
     uint32_t fbo11;      // seg0 offset of FBO 11's entry in the FBO table (+0x18/+0x1C offset; 0: at 0,0)
     uint32_t fbo11_size; // render manager + this: FBO 11's logical size (w, h), this frame's
-    int below;           // default: sharpen images narrower than this (f 2nd 640; f 960, its stock 640 too)
+    int below;           // default: sharpen images narrower than this (640: when dynamic resolution lowers it)
 } sharpen_game_t;
 
 // hooks the blit at game start, if the shaders are there
@@ -26,7 +26,7 @@ void sharpen_shutdown(void);
 void sharpen_set_strength(int percent);   // 0..100
 void sharpen_set_below(int width);        // sharpen only 3D images narrower than this (0: the game's default)
 void sharpen_set_enabled(int on);         // the setting (with OPT and opt.txt's sharpen)
-void sharpen_set_style(int style);        // the setting: 0 adaptive (CAS weighting), 1 classic, 2 adaptive x2
+void sharpen_set_style(int style);        // the setting: 0 adaptive (CAS weighting), 1 classic, 2 adaptive + AA (FXAA at 640 and up)
 // main.c's sceGxmBeginScene hook, before the game's call: runs our pass when
 // it is the framebuffer scene of stage 4 (returns 1 if it did)
 int sharpen_before_scene(void *ctx, uint32_t ret_addr, int stage);

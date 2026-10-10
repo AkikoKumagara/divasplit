@@ -1,0 +1,45 @@
+/*
+ * Light anti-aliasing of the 3D image at its own resolution, before the game
+ * stretches it (where it isn't sharpened: 640 wide and up). FXAA's console
+ * variant (after Timothy Lottes' FXAA 3.11): luma at the 4 corners (one
+ * bilinear read each covers 2x2 texels) and the centre; where the contrast is
+ * an edge, 2 reads along it (and 2 further out, unless they cross another
+ * edge) replace the pixel. 9 reads where it acts, 5 elsewhere. The 3D is
+ * already 4x MSAA: this is for what that misses (alpha-cut hair, thin lines).
+ *
+ *   k.xy  one texel in UV; k.z the edge threshold (of the local maximum),
+ *   k.w   its minimum (dark areas)
+ *   lim   the image's area in the texture, half a texel in (the rest is stale)
+ */
+half luma(half3 c)
+{
+    return dot(c, half3(0.299, 0.587, 0.114));
+}
+
+half4 main(float2 uv : TEXCOORD0, uniform sampler2D tex, uniform float4 k, uniform float4 lim) : COLOR
+{
+    float2 hlf = k.xy * 0.5;
+    half4 m = tex2D(tex, uv);
+    half nw = luma(tex2D(tex, clamp(uv - hlf, lim.xy, lim.zw)).rgb);
+    half sw = luma(tex2D(tex, clamp(uv + float2(-hlf.x, hlf.y), lim.xy, lim.zw)).rgb);
+    half ne = luma(tex2D(tex, clamp(uv + float2(hlf.x, -hlf.y), lim.xy, lim.zw)).rgb) + (half)(1.0 / 384.0);
+    half se = luma(tex2D(tex, clamp(uv + hlf, lim.xy, lim.zw)).rgb);
+    half lm = luma(m.rgb);
+    half lmax = max(max(nw, sw), max(ne, se));
+    half lmin = min(min(nw, sw), min(ne, se));
+    if (max(lmax, lm) - min(lmin, lm) < max((half)k.w, lmax * (half)k.z))
+        return m;   // no edge
+    // along the edge: perpendicular to the luma gradient (rows from the top)
+    half a = sw - ne, b = se - nw;
+    float2 d = float2(a + b, a - b);
+    float2 dir1 = d * rsqrt(max(dot(d, d), 1e-8));
+    float2 dir2 = clamp(dir1 / (min(abs(dir1.x), abs(dir1.y)) * 8.0 + 1e-4), -2.0, 2.0);
+    half3 n1 = tex2D(tex, clamp(uv - dir1 * hlf, lim.xy, lim.zw)).rgb;
+    half3 p1 = tex2D(tex, clamp(uv + dir1 * hlf, lim.xy, lim.zw)).rgb;
+    half3 n2 = tex2D(tex, clamp(uv - dir2 * k.xy * 2.0, lim.xy, lim.zw)).rgb;
+    half3 p2 = tex2D(tex, clamp(uv + dir2 * k.xy * 2.0, lim.xy, lim.zw)).rgb;
+    half3 ra = (n1 + p1) * (half)0.5;
+    half3 rb = (n1 + p1 + n2 + p2) * (half)0.25;
+    half lb = luma(rb);
+    return half4(lb < lmin || lb > lmax ? ra : rb, m.a);   // the wide blend crossed another edge: the near one
+}

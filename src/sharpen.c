@@ -26,12 +26,14 @@
  * Menus (drawn 1:1) are left alone. AMD's RCAS on the full-screen blit was
  * tried first: 12 ms of GPU time a frame on stock clocks, too much.
  *
- * Styles (the setting): adaptive, shaders/cas_f.cg (AMD CAS's weighting: less
- * on edges that already have contrast, so stair-steps aren't hardened); adaptive
- * x2, a second pass over the first's output (stronger and a little wider, past
- * CAS's strongest; a second buffer, ~1.7 ms more GPU at 480x272 on stock
- * clocks); classic, shaders/sharpen_f.cg (a clamped unsharp mask). Without
- * cas_f, classic.
+ * Below the threshold (640 wide: dynamic resolution lowered it) the image is
+ * sharpened, adaptive, shaders/cas_f.cg (AMD CAS's weighting: less on edges
+ * that already have contrast, so stair-steps aren't hardened), or classic,
+ * shaders/sharpen_f.cg (a clamped unsharp mask; also without cas_f). At the
+ * threshold and up it is left alone, or with the style adaptive + AA smoothed:
+ * shaders/fxaa_f.cg, FXAA's console variant (the 3D is 4x MSAA already; this
+ * is for alpha-cut edges and the like). (Two adaptive passes were tried:
+ * "deep fried".)
  *
  * Our programs: the .gxp files in ux0:data/divasplit/shaders/ when the installer compiled
  * them there (ur0:data/libshacccg.suprx), else the copies built in
@@ -57,21 +59,26 @@ typedef struct {
     unsigned int size;
 } block_t;
 
-enum { B_HOST, B_PATCH, B_VUSSE, B_FUSSE, B_PROGS, B_QUAD, B_COLOR, B_RTMEM, B_COLOR2, B_COUNT };
+enum { B_HOST, B_PATCH, B_VUSSE, B_FUSSE, B_PROGS, B_QUAD, B_COLOR, B_RTMEM, B_COUNT };
 static block_t s_b[B_COUNT];
 static int s_mapped[B_COUNT], s_vusse_map, s_fusse_map;
 static SceClibMspace s_host;
 static SceGxmShaderPatcher *s_patcher;
-enum { P_CLASSIC, P_ADAPTIVE, P_COUNT };   // the fragment programs (styles)
-static const char *const P_FILE[P_COUNT] = {"sharpen_f.gxp", "cas_f.gxp"};
+enum { P_CLASSIC, P_ADAPTIVE, P_FXAA, P_COUNT };   // the fragment programs
+static const char *const P_FILE[P_COUNT] = {"sharpen_f.gxp", "cas_f.gxp", "fxaa_f.gxp"};
+static const char *const P_NAME[P_COUNT] = {"classic", "adaptive", "fxaa"};
 static const SceGxmProgram *s_vprog, *s_fprog[P_COUNT];
 static SceGxmShaderPatcherId s_vid, s_fid[P_COUNT];
 static SceGxmVertexProgram *s_vp;
 static SceGxmFragmentProgram *s_fp[P_COUNT];
 static const SceGxmProgramParameter *s_u_rect, *s_u_k[P_COUNT], *s_u_lim[P_COUNT];
-enum { STYLE_ADAPTIVE, STYLE_CLASSIC, STYLE_ADAPTIVE2 };   // the setting
+// the setting: below the threshold adaptive or classic sharpening; adaptive + AA
+// also smooths the image's edges (FXAA) at the threshold and up, where it isn't sharpened
+enum { STYLE_ADAPTIVE, STYLE_CLASSIC, STYLE_ADAPTIVE_AA };
+static const char *const STYLE_NAME[3] = {"adaptive", "classic", "adaptive + AA"};
 static volatile int s_style = STYLE_ADAPTIVE;
-static int s_used = -1;                     // the style of the last pass (STYLE_*)
+static volatile unsigned int d_aa;   // FXAA passes
+static int s_used = -1;                     // the program of the last pass
 static const float *s_quad;
 static const uint16_t *s_idx;
 static int s_state;   // 1 programs loaded and hooked, 2 GPU side ready too, < 0 why not
@@ -92,9 +99,7 @@ static uint8_t *s_src;          // the engine's texture object of the 3D image (
 static float s_uv[4];           // the image's area in it (last blit)
 static uint8_t *s_done;         // our copy of s_src is ready for this frame's blit
 static SceGxmRenderTarget *s_rt;
-static SceGxmColorSurface s_surf, s_surf2;   // our copy; the second pass's (adaptive x2)
-static SceGxmColorFormat s_cf;
-static int s_second_fail;                    // no second buffer: one pass
+static SceGxmColorSurface s_surf;
 static SceGxmTexture s_out;     // s_src's descriptor, our data
 static unsigned int s_tw, s_th, s_tstride;
 static SceGxmTextureFormat s_tfmt;
@@ -192,6 +197,11 @@ static int load(void) {
     s_fprog[P_ADAPTIVE] = load_gxp(P_FILE[P_ADAPTIVE], GXP_CAS_F, sizeof(GXP_CAS_F), &off);
 #else
     s_fprog[P_ADAPTIVE] = load_gxp(P_FILE[P_ADAPTIVE], NULL, 0, &off);   // only compiled by the installer yet
+#endif
+#ifdef HAVE_GXP_FXAA_F
+    s_fprog[P_FXAA] = load_gxp(P_FILE[P_FXAA], GXP_FXAA_F, sizeof(GXP_FXAA_F), &off);
+#else
+    s_fprog[P_FXAA] = load_gxp(P_FILE[P_FXAA], NULL, 0, &off);
 #endif
     if (!s_vprog || !s_fprog[P_CLASSIC])
         return -3;
@@ -310,7 +320,6 @@ static int make_target(const SceGxmTexture *src) {
         return why(W_ALLOC, r);
     if ((r = gpu_map(B_COLOR, SCE_GXM_MEMORY_ATTRIB_RW)) < 0)
         return why(W_MAP, r);
-    s_cf = cf;
     if ((r = sceGxmColorSurfaceInit(&s_surf, cf, SCE_GXM_COLOR_SURFACE_LINEAR, SCE_GXM_COLOR_SURFACE_SCALE_NONE,
             SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h, stride, s_b[B_COLOR].base)) < 0)
         return why(W_SURFACE, r);
@@ -359,28 +368,6 @@ static int ensure_target(const SceGxmTexture *src) {
     return 0;
 }
 
-// the second pass's buffer (adaptive x2), like the first, made on first use; a failure is final
-static int ensure_second(void) {
-    if (s_b[B_COLOR2].base)
-        return 1;
-    if (s_second_fail)
-        return 0;
-    unsigned int size = s_tstride * s_th * 4;
-    int r = block_alloc(&s_b[B_COLOR2], "divasplit_sh_color2", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, 256 * 1024);
-    if (r < 0)
-        r = block_alloc(&s_b[B_COLOR2], "divasplit_sh_color2", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, size, 4096);
-    if (r >= 0 && gpu_map(B_COLOR2, SCE_GXM_MEMORY_ATTRIB_RW) >= 0
-            && sceGxmColorSurfaceInit(&s_surf2, s_cf, SCE_GXM_COLOR_SURFACE_LINEAR, SCE_GXM_COLOR_SURFACE_SCALE_NONE,
-                    SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, s_tw, s_th, s_tstride, s_b[B_COLOR2].base) >= 0)
-        return 1;
-    s_second_fail = r < 0 ? r : -1;
-    if (s_mapped[B_COLOR2])
-        sceGxmUnmapMemory(s_b[B_COLOR2].base);
-    s_mapped[B_COLOR2] = 0;
-    block_free(&s_b[B_COLOR2]);
-    return 0;
-}
-
 /* ---- the pass and the blit ---------------------------------------------- */
 
 // an engine texture object (0x4E16E4, glBindTexture): word 0 bit 1 = initialized, the
@@ -412,81 +399,79 @@ static int pass(SceGxmContext *ctx) {
         y0 = ent[0x1C / 4];
     }
     int x1 = x0 + sz[0], y1 = y0 + sz[1];
-    if (x1 - x0 >= 959 || x1 - x0 >= s_below) {   // 1:1 (menus) or a mild stretch: left alone
+    // below the threshold sharpened; at it and up (f's stock 640, f 2nd's 720) left
+    // alone, or smoothed (adaptive + AA); 1:1 (menus) always left alone
+    int p;
+    if (x1 - x0 >= 959) {
+        p = -1;
+    } else if (x1 - x0 < s_below) {
+        p = s_style != STYLE_CLASSIC && s_fp[P_ADAPTIVE] ? P_ADAPTIVE : P_CLASSIC;
+        if (s_amount <= 0.0f)
+            p = -1;
+    } else {
+        p = s_style == STYLE_ADAPTIVE_AA && s_fp[P_FXAA] ? P_FXAA : -1;
+    }
+    if (p < 0) {
         d_one++;
         return 0;
     }
     if (x0 < 0 || y0 < 0 || x1 > (int)s_tw || y1 > (int)s_th || x1 - x0 < 16 || y1 - y0 < 16)
         return why(W_AREA, x1 << 16 | y1);
     SceGxmValidRegion vr = {(unsigned int)x1 - 1, (unsigned int)y1 - 1};   // from (0, 0): the image's corner
+    int r = sceGxmBeginScene(ctx, 0, s_rt, &vr, NULL, NULL, &s_surf, NULL);
+    if (r < 0)
+        return why(W_BEGIN, r);
+    // the image's area, rows from the top, the same in our copy as in the source
     float w = (float)(x1 - x0), h = (float)(y1 - y0);
-    int p = s_style != STYLE_CLASSIC && s_fp[P_ADAPTIVE] ? P_ADAPTIVE : P_CLASSIC;   // the program
-    // adaptive x2: a second pass over the first's output (ping-pong with a second buffer)
-    int n = p == P_ADAPTIVE && s_style == STYLE_ADAPTIVE2 && ensure_second() ? 2 : 1;
-    s_used = p == P_CLASSIC ? STYLE_CLASSIC : n == 2 ? STYLE_ADAPTIVE2 : STYLE_ADAPTIVE;
-    // the more the image is stretched, the more it needs: the setting up to 1.5x
-    // (f's stock 640, a mild stretch), x1.2 at 2x (480), at most x1.3
-    float boost = 1.0f + 0.4f * (960.0f / w - 1.5f);
-    boost = boost < 1.0f ? 1.0f : boost > 1.3f ? 1.3f : boost;
-    float amount = s_amount * boost;
-    s_last_amount = amount;
-    // classic: the unsharp amount (0..2.6) and overshoot; adaptive: CAS's peak weight
-    // (0..-0.2, its strongest: 1 + 4w stays > 0), the same sharpening as classic on
-    // soft detail at the same setting
-    float peak = -0.1f * amount < -0.2f ? -0.2f : -0.1f * amount;
-    float rect[4] = {x0 / tw, y0 / th, x1 / tw, y1 / th};
-    float hx = 0.5f / tw, hy = 0.5f / th;
-    float k[4] = {1.0f / tw, 1.0f / th, p == P_ADAPTIVE ? peak : amount, p == P_ADAPTIVE ? 0.0f : s_over};
-    float lim[4] = {rect[0] + hx, rect[1] + hy, rect[2] - hx, rect[3] - hy};
-    const SceGxmTexture *in = src;
-    SceGxmTexture mid;   // the last pass's output: the engine's sampling settings, our pixels
-    int done = 0;
-    for (int i = 0; i < n; i++) {
-        SceGxmColorSurface *surf = i & 1 ? &s_surf2 : &s_surf;
-        int r = sceGxmBeginScene(ctx, 0, s_rt, &vr, NULL, NULL, surf, NULL);
-        if (r < 0) {
-            if (!done)
-                return why(W_BEGIN, r);
-            break;   // the first pass's output stands
-        }
-        // the image's area, rows from the top, the same in our copies as in the source
-        sceGxmSetViewport(ctx, x0 + w * 0.5f, w * 0.5f, y0 + h * 0.5f, -h * 0.5f, 0.5f, 0.5f);
-        sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, x0, y0, x1 - 1, y1 - 1);
-        sceGxmSetCullMode(ctx, SCE_GXM_CULL_NONE);
-        sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
-        sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
-        sceGxmSetVertexProgram(ctx, s_vp);
-        sceGxmSetFragmentProgram(ctx, s_fp[p]);
-        sceGxmSetFragmentTexture(ctx, 0, in);   // copies the descriptor: mid can change after
-        void *vb = NULL, *fb = NULL;
-        sceGxmReserveVertexDefaultUniformBuffer(ctx, &vb);
-        sceGxmReserveFragmentDefaultUniformBuffer(ctx, &fb);
-        if (vb && fb) {
-            sceGxmSetUniformDataF(vb, s_u_rect, 0, 4, rect);
-            sceGxmSetUniformDataF(fb, s_u_k[p], 0, 4, k);
-            sceGxmSetUniformDataF(fb, s_u_lim[p], 0, 4, lim);
-            sceGxmSetVertexStream(ctx, 0, s_quad);
-            sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLE_STRIP, SCE_GXM_INDEX_FORMAT_U16, s_idx, 4);
-        }
-        sceGxmEndScene(ctx, NULL, NULL);
-        if (!vb || !fb) {
-            if (!done)
-                return why(W_UNIFORMS, 0);
-            break;
-        }
-        mid = *src;
-        sceGxmTextureSetData(&mid, s_b[i & 1 ? B_COLOR2 : B_COLOR].base);
-        in = &mid;
-        done++;
+    sceGxmSetViewport(ctx, x0 + w * 0.5f, w * 0.5f, y0 + h * 0.5f, -h * 0.5f, 0.5f, 0.5f);
+    sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, x0, y0, x1 - 1, y1 - 1);
+    sceGxmSetCullMode(ctx, SCE_GXM_CULL_NONE);
+    sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
+    sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
+    s_used = p;
+    sceGxmSetVertexProgram(ctx, s_vp);
+    sceGxmSetFragmentProgram(ctx, s_fp[p]);
+    sceGxmSetFragmentTexture(ctx, 0, src);
+    void *vb = NULL, *fb = NULL;
+    sceGxmReserveVertexDefaultUniformBuffer(ctx, &vb);
+    sceGxmReserveFragmentDefaultUniformBuffer(ctx, &fb);
+    if (vb && fb) {
+        float rect[4] = {x0 / tw, y0 / th, x1 / tw, y1 / th};
+        float hx = 0.5f / tw, hy = 0.5f / th;
+        // the more the image is stretched, the more it needs: the setting up to 1.5x
+        // (f's stock 640, a mild stretch), x1.2 at 2x (480), at most x1.3
+        float boost = 1.0f + 0.4f * (960.0f / w - 1.5f);
+        boost = boost < 1.0f ? 1.0f : boost > 1.3f ? 1.3f : boost;
+        float amount = s_amount * boost;
+        s_last_amount = amount;
+        // classic: the unsharp amount (0..2.6) and overshoot; adaptive: CAS's peak weight
+        // (0..-0.2, its strongest: 1 + 4w stays > 0), the same sharpening as classic on
+        // soft detail at the same setting
+        float peak = -0.1f * amount < -0.2f ? -0.2f : -0.1f * amount;
+        // FXAA: edges where the contrast is 1/8 of the local maximum, at least 0.05
+        float k[4] = {1.0f / tw, 1.0f / th, p == P_FXAA ? 0.125f : p == P_ADAPTIVE ? peak : amount,
+                p == P_FXAA ? 0.05f : p == P_ADAPTIVE ? 0.0f : s_over};
+        float lim[4] = {rect[0] + hx, rect[1] + hy, rect[2] - hx, rect[3] - hy};
+        sceGxmSetUniformDataF(vb, s_u_rect, 0, 4, rect);
+        sceGxmSetUniformDataF(fb, s_u_k[p], 0, 4, k);
+        sceGxmSetUniformDataF(fb, s_u_lim[p], 0, 4, lim);
+        sceGxmSetVertexStream(ctx, 0, s_quad);
+        sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLE_STRIP, SCE_GXM_INDEX_FORMAT_U16, s_idx, 4);
     }
+    sceGxmEndScene(ctx, NULL, NULL);
+    if (!vb || !fb)
+        return why(W_UNIFORMS, 0);
     s_why = W_OK;
-    s_out = mid;
+    s_out = *src;   // the engine's sampling settings, our pixels
+    sceGxmTextureSetData(&s_out, s_b[B_COLOR].base);
     d_passes++;
+    if (p == P_FXAA)
+        d_aa++;
     return 1;
 }
 
 int sharpen_before_scene(void *ctx, uint32_t ret_addr, int stage) {
-    if (ret_addr != s_begin_ret || stage != s_game->stage || s_state < 1 || !s_src || s_amount <= 0.0f || !s_enabled
+    if (ret_addr != s_begin_ret || stage != s_game->stage || s_state < 1 || !s_src || !s_enabled
             || !opt_cut_on(OPT_SHARPEN))
         return 0;
     if (s_state == 1) {   // first time: the GPU side, once
@@ -596,7 +581,7 @@ void sharpen_set_enabled(int on) {
 }
 
 void sharpen_set_style(int style) {
-    s_style = style == 1 ? STYLE_CLASSIC : style == 2 ? STYLE_ADAPTIVE2 : STYLE_ADAPTIVE;
+    s_style = style == 1 ? STYLE_CLASSIC : style == 2 ? STYLE_ADAPTIVE_AA : STYLE_ADAPTIVE;
 }
 
 void sharpen_set_below(int width) {
@@ -611,15 +596,14 @@ void sharpen_set_strength(int percent) {
     s_amount = (percent < 0 ? 0 : percent > 100 ? 100 : percent) / 50.0f;
 }
 
-static const char *const STYLE_NAME[3] = {"adaptive", "classic", "adaptive x2"};
-
 int sharpen_diag(char *buf, int size) {
-    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X%s style %s (adaptive %s, last %s, 2nd buffer %d) amount %d%% (last %d%%) below %d;"
-            " passes %u swaps %u wide %u bad %u (step %d err %08X; image %ux%u fmt %08X type %08X)",
+    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X%s style %s (adaptive %s, fxaa %s, last %s) amount %d%% (last %d%%) below %d;"
+            " passes %u (fxaa %u) swaps %u wide %u bad %u (step %d err %08X; image %ux%u fmt %08X type %08X)",
             s_state, s_hook, s_builtin ? " built-in" : "", STYLE_NAME[s_style],
             !s_fprog[P_ADAPTIVE] ? "missing" : s_state < 2 ? "loaded" : s_fp[P_ADAPTIVE] ? "ready" : "failed",
-            s_used < 0 ? "-" : STYLE_NAME[s_used], s_b[B_COLOR2].base ? 1 : s_second_fail,
-            (int)(s_amount * 50.0f + 0.5f), (int)(s_last_amount * 50.0f + 0.5f), s_below, d_passes, d_swaps,
+            !s_fprog[P_FXAA] ? "missing" : s_state < 2 ? "loaded" : s_fp[P_FXAA] ? "ready" : "failed",
+            s_used < 0 ? "-" : P_NAME[s_used],
+            (int)(s_amount * 50.0f + 0.5f), (int)(s_last_amount * 50.0f + 0.5f), s_below, d_passes, d_aa, d_swaps,
             d_one, d_bad,
             s_why, (unsigned)s_why_err, s_src_w, s_src_h, s_src_fmt, s_src_type);
 }

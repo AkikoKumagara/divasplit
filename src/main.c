@@ -252,7 +252,7 @@ static const drs_game_t F_DRS = {.stage = 5, .scene_ret = 0x28D364, .d_mgr = 0x2
 // f's final blit (0x283B48, stage 10): quad 0x28260C called at 0x283CCE; FB scene begin 0x3D95BE
 static const sharpen_game_t F_SHARPEN = {.blit = 0x28260C, .blit_ret = 0x283CD2, .begin_ret = 0x3D95F2,
         .stage = 10, .bind_now = 1, .d_gl = 0x2FC6B8, .tex_units = 0x1225DC, .d_mgr = 0x26FB6C,
-        .fbo11_size = 0x30, .below = 960};
+        .fbo11_size = 0x30, .below = 640};   // stock 640 isn't sharpened (AA there, if asked)
 
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
