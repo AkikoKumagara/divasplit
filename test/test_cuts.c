@@ -230,11 +230,31 @@ static void print_patch(void) {
     }
 }
 
+// cuts_fill_changed against memset, every alignment and length, random contents
+static int test_fill(void) {
+    static uint8_t a[300], b[300];
+    int bad = 0;
+    for (int off = 0; off < 8; off++)
+        for (unsigned int n = 0; n <= 240; n++)
+            for (int rep = 0; rep < 20; rep++) {
+                for (int i = 0; i < 300; i++)
+                    a[i] = b[i] = (rand() & 3) ? 0 : (uint8_t)rand();
+                uint8_t c = rep & 1 ? 0 : (uint8_t)rand();
+                memset(a + off, c, n);
+                cuts_fill_changed(b + off, c, n);
+                if (memcmp(a, b, sizeof(a)) != 0)
+                    bad++;
+            }
+    printf("fill: %d mismatches against memset\n", bad);
+    return bad != 0;
+}
+
 int main(void) {
     srand(1);
     print_patch();
     int bad = test_centre();
     bad |= test_sort();
+    bad |= test_fill();
     printf(bad ? "FAILED\n" : "ok\n");
     return bad;
 }

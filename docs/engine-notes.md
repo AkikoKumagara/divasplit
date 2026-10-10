@@ -109,11 +109,32 @@ obj+0xF48; render: base+0xC44, a live table).
   size | flag bit 31}` from `+0x34`.
   - The vertex `memcpy` at `0x4DE906` is the biggest single cost: ~850 copies,
     ~850 KB a frame into the GXM ring (`0x7018xxxx`–`0x7077xxxx`), ~1.5 ms
-    across stages 2–5. Blocks are 4880 bytes (bone palettes); 54% repeat the
-    previous draw's block.
+    across stages 2–5. Blocks are 4880 bytes; 54% repeat the previous draw's
+    block, almost all of them 2D sprites in stage 5 (≥95% of stage-5 blocks
+    repeat, ≤27% of stage 3's). Bone palettes never repeat: each draw item gets
+    its own from a bump pool (`0x2448C8`).
+  - What fills `T` (the vertex table, 0x1350 bytes; name table `0x816DA9D8`):
+    `program_lcl` 0 (128 B), `program_env` 0x80 (3584 B),
+    `state_matrix_program` 0xE80 (576 B), `mvp` 0x10C0, `state_matrix_texture`
+    0x1100 (512 B), five materials 0x1300..0x1350. The fragment table `F` is
+    `T+0x1350`. Writers during play: the setters `0x4DFBE4` / `0x4DFC72` (env,
+    flags `T+0x1A2A+i`; fragment env `F+0x200+16i`, i < 32, flags `T+0x1B0A+i`)
+    and `0x4DFD12` / `0x4DFDA2` (local, flags `T+0x1B2A`), the per-draw setup
+    `0x4DF052` (MVP), and its flush `0x4DEF04`: material copies `0x4DE314`,
+    matrices `0x4DE954` (P, MV, MVP always; program / texture matrices only
+    when their dirty byte `mc+0x6EC+0x14k` / `mc+0x5AC+0x14j` is set).
+  - The game already sorts and merges each program's parameter entries at
+    init (`0x4DF6F2` vertex, `0x4DF2C8` fragment): about 5 copies per block.
+  - Copies cost about 1.03 ns/B into cached memory and 2.24 ns/B into the
+    ring (v10 A/B, clean windows).
   - A second vertex binding path is `0x4E0514` (reserve `0x4E0572`).
-- Draw wrappers: `0x4D8CCA` (3 vertex streams + `sceGxmDraw`), `0x4E1190`
-  (polygon mode ×3), `0x4E064A`, `0x4E0674`.
+- Draw wrappers: `0x4D8CCA` (3 vertex streams + `sceGxmDraw`; can return
+  before drawing), `0x4E1190` (polygon mode ×3; 2D, calls the pre-draw
+  callback with `blx r3` at `0x4E11A8` and always draws), `0x4E064A`,
+  `0x4E0674`.
+- Per-draw uniform setup `0x4DF052`: 3D calls it at `0x247ED6`, 2D through
+  the draw descriptor (`0x4D8626`). MVP, flush `0x4DEF04`, vertex binding
+  `0x4DE828`, which calls the fragment binding `0x4DE706`.
 - 4×4 matrix multiply `0x4D0FDE`: `out[i][j] = A[i][1]*B[1][j] + A[i][0]*B[0][j]
   + A[i][2]*B[2][j] + A[i][3]*B[3][j]`, scalar VFP, all loads before stores.
   The same bytes are at `0x3CCB02` in f; X has only transposed variants
@@ -129,9 +150,35 @@ checks `centre` and `lsort` on the host against the game's versions.
 | Cut | Where | What | Expected (light / heavy frames) |
 |---|---|---|---|
 | `centre` | hook `0x245CDC` | The 3D sort keys average a skinned object's centre over its bones: per bone `xform(inverse(W) * B_i * (W * X), c)`, two 4x4 products and a transform. Linear in `B_i`: sum the bones first, then one product chain. Same up to float rounding (host test: 8e-6 relative). Called only from `0x246050` (stage 3, main thread). | 0.45 / 0.8 ms |
-| `dirty` | patch `0x4DF012` (32 bytes) | `0x4DEF04` (once per draw flush, gated by `[T+0x1B50]`) clears 224 dirty-flag bytes at `T+0x1A2A` one by one (`if (b) b = 0`); patched once at game start to call the plugin, which does one `memset` (cut on) or the same loop (off). Same memory afterwards. Patching it at run time instead (for A/B) risks a core still holding the old bytes. | 0.4–0.5 / 0.55–0.65 ms |
+| `dirty` | patch `0x4DF012` (32 bytes) | `0x4DEF04` (once per draw flush, gated by `[T+0x1B50]`) clears 224 dirty-flag bytes at `T+0x1A2A` one by one (`if (b) b = 0`); patched once at game start to call the plugin, which compares a word at a time and writes only words that aren't 0 (cut on), or runs the same loop (off). Same memory afterwards. The first build called `sceClibMemset` here: see below. Patching it at run time instead (for A/B) risks a core still holding the old bytes. | 0.4–0.5 / 0.55–0.65 ms |
 | `lsort` | hook `0x5ABB9C` | `std::list::sort` of the draw lists allocates 27 list heads per call from a locked heap. Bottom-up merge sort over static arrays: stable, the same order. Callers `0x246A68/90/B0` only. | 0.08 / 0.15 ms |
 | `nosort0` | stage table byte `0x81B628A1` | Skip sorting the opaque list 0 front to back (`0x265ACE`). Changes draw order (coplanar flicker possible); off by default. | +0.2 ms on top of the others |
+
+Measured (2026-10-10, f 2nd heavy PV, A/B, 180 paired seconds, first build
+with `sceClibMemset` in `dirty`): stage 3 −0.65 ms per frame in every 20 s
+block, but the rest of the main thread +0.35 ms, net cpu −0.29 ms, fps
+unchanged within noise. Only `dirty` runs outside stage 3, so the library call
+per flush (~150–200 a frame) cost more than the byte loop it replaced. The
+next build clears inline and times both at start (diag.txt `r2:` line).
+
+Round 2 (on top of the above; profile ms, about 8% inflated by the sampler).
+`test/test_r2.c` checks `keyset` and `h2f` on the host against vectors made by
+emulating the game's machine code.
+
+| Cut | Where | What | Expected (light / heavy) |
+|---|---|---|---|
+| `ureuse` | hook `0x4DF052` + import hook `sceGxmReserveVertexDefaultUniformBuffer` | 2D draws only: when no setter flag or matrix dirty byte is set and MV, P and the materials are bitwise unchanged, `T` after the flush is byte-identical to the last flush's, so the block uploaded then (same program record, same `SceGxmVertexProgram`, same scene) is the one the game would write. Skip the flush, MVP and copies; `sceGxmSetVertexDefaultUniformBuffer` to the old block. Never compares block data except the check (`check=1`, else 1 in 1024: reused block against `T`, entry by entry; a difference turns it off for the session). | 0.75 / 0.8 ms (by hit rate) |
+| `matdup` | patches `0x4DEF28` (16 B), `0x4DE994` (22 B) | The flush's ten 16-byte material getters are two 80-byte copies of `G+0x30F14`; `0x4DE954` recomputes the MVP `0x4DF052` just stored at `T+0x10C0`. | 0.14 / 0.18 ms |
+| `palette` | hook `0x2472A0` | Bone palette: three `0x4DFBE4` calls per bone → plain copies to `T+0x280+48i` and one flag `memset`. | 0.07 ms |
+| `texwrap` | hook `0x4E1B30` | `texParameteri` WRAP_S/T: the same stores and `sceGxmTextureSetU/VAddrMode` call without the 3-level dispatch. | 0.06 / 0.08 ms |
+| `keyset` | hook `0x20462A` (RobThreads) | ROB_BASE key-set evaluator `0x204334` inlined, the game's exact VFP sequence. Shortens the ROB_BASE join wait. | 0.06–0.1 ms |
+| `h2f` | 90-byte patch `0x4B1A48` | half → float without the stack-canary prologue; all 65536 inputs checked against the original at start, before and after patching. | ~0.03 ms (with `keyset` off) |
+| `nolog` | 2-byte patch `0x3367D2` | The DSC player formats a trace line per command into a ring nothing reads (`0x81773808`). | 0.01 / 0.02 ms |
+| `earlykick` | hooks `0x336402`, `0x35C71E` | Kick ROB_BASE right after the DSC interpreter instead of after the PV update tail, when no PvOsageManager slot is busy or ready. Not proven exact (indirect calls in the tail, late task requests): off by default; `ekcheck` hashes the robot state at both points first. | 0.15–0.2 ms × the share of frames it applies to |
+| `ucopy` | hooks `0x4DE828`, `0x4DE706` | Timing experiment: the bindings with aligned NEON copies instead of SceLibc `memcpy`. Off by default. | −0.05 … +0.35 ms |
+
+`h2f` and `nolog` are patched at start if set then; `earlykick`, `ekcheck`
+and `ucopy` are hooked only if set at start.
 
 Stage 3 is not the only thing that grows in heavy frames: PVGAME ctrl
 (`0x5F1B40`) grows 0.23 → 0.48 ms, in the PV script `0x3256EC` → `0x325374` →
@@ -163,7 +210,25 @@ Stage 3 is not the only thing that grows in heavy frames: PVGAME ctrl
   immediate-mode state machine on global state (uniform table, TLS matrix
   stacks); it would mean replacing the engine's GL layer.
 
+- **3D uniform reuse:** stage-3 blocks repeat at most 20–27%; checking the
+  flagged palette and env entries costs about what reuse saves.
+- **Splitting one ROB_BASE job across the RobThreads:** all 3 cores are busy
+  from kick to join; at most 0.27 / 0.18 ms even with perfect sharing.
+  `mult_0` and `mult_1` aren't redundant (IK runs between them).
+- **PV script "doubling" in heavy frames** is mostly the 18 ms sampling
+  artifact; no scan in it grows with script length.
+- **Fragment uniform reuse:** stage 5's fragment binding is 0.03 ms.
+
 ## Things that bite
+
+- `TAI_CONTINUE` calls through an unprototyped pointer: a `float` argument is
+  promoted to `double` and passed in `d0`, not `s0`, so the game's function
+  gets garbage. Hooks with float arguments call on through a prototyped
+  pointer (`TAI_NEXT` in `src/opt.c`).
+- Don't call `sceClib*` functions in per-draw paths: a 224-byte
+  `sceClibMemset` per flush was slower than the game's byte loop.
+- Profiles split at 18 ms are biased (every function gains about one sample
+  in the 17–19 ms buckets). Classify frames by vblank count instead.
 
 - `TAI_CONTINUE` declares locals named `cur` and `next`; a variable of either
   name passed to it is silently replaced (this caused a black screen). Build

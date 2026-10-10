@@ -146,9 +146,22 @@ typedef struct {
 } game_t;
 
 // f 2nd EU 1.00 (docs/engine-notes.md "Main-thread cuts")
+// round 2 (opt.c "Round 2"); data: seg1 offsets of 0x81D1E2A8 (GL state), 0x81772644 (render
+// context TLS), 0x81C44DC4 (PV kick byte), 0x817717A4 (PvOsageManager), 0x81C62B54, 0x81C576C8
+static const opt_r2_t F2ND_R2 = {
+    .predraw = 0x4DF052, .predraw_ret2d = 0x4E11AA, .vbind = 0x4DE828, .fbind = 0x4DE706, .flush_tex = 0x4E185A,
+    .reserve_ret = 0x4DE8B8, .mat_patch = 0x4DEF28, .mat_get = 0x4DE314, .mvp_patch = 0x4DE994,
+    .transpose = 0x4D1F44, .palette = 0x2472A0, .texparam = 0x4E1B30, .keyset_loop = 0x20462A,
+    .h2f = 0x4B1A48, .dsc_trace = 0x3367D2, .dsc_run = 0x336402, .dsc_ret = 0x31BA22, .base_kick = 0x35C71E,
+    .stub_tls = 0x65F768, .stub_memcpy = 0x65F5F8, .stub_set_vp = 0x65F068, .stub_set_fp = 0x65F1C8,
+    .stub_reserve_v = 0x65F198, .stub_reserve_f = 0x65F148, .stub_set_data_f = 0x65F0F8,
+    .stub_uaddr = 0x65F0A8, .stub_vaddr = 0x65EFE8,
+    .d_gl = 0x6032A8, .d_tls_render = 0x57644, .d_pv_kick = 0x529DC4, .d_osage = 0x567A4,
+    .d_rob_mgr = 0x547B54, .d_rob_chara = 0x53C6C8,
+};
 static const opt_cuts_t F2ND_CUTS = {
     .centre = 0x245CDC, .mul44 = 0x4D0FDE, .inv44 = 0x4D0BE0, .xform = 0x4D1DC6,
-    .dirty_loop = 0x4DF012, .list_sort = 0x5ABB9C, .sort0_flag = 0x4478A1,
+    .dirty_loop = 0x4DF012, .list_sort = 0x5ABB9C, .sort0_flag = 0x4478A1, .r2 = &F2ND_R2,
 };
 
 static const game_t GAMES[] = {
@@ -653,13 +666,21 @@ static void opt_file_load(void) {
         const char *key;
         unsigned int bit;
     } KEYS[] = {{"centre", OPT_CENTRE}, {"dirty", OPT_DIRTY}, {"lsort", OPT_LSORT},
-            {"nosort0", OPT_NOSORT0}, {"pin", OPT_PIN}, {"check", OPT_CHECK}};
-    char buf[256];
+            {"nosort0", OPT_NOSORT0}, {"pin", OPT_PIN}, {"check", OPT_CHECK},
+            {"ureuse", OPT_UREUSE}, {"matdup", OPT_MATDUP}, {"palette", OPT_PALETTE},
+            {"texwrap", OPT_TEXWRAP}, {"keyset", OPT_KEYSET}, {"h2f", OPT_H2F}, {"nolog", OPT_NOLOG},
+            {"earlykick", OPT_EARLYKICK}, {"ucopy", OPT_UCOPY}, {"ekcheck", OPT_EKCHECK}};
+    static char buf[1024];   // the input thread, after module_start
     unsigned int mask = OPT_DEFAULT;
     SceUID fd = sceIoOpen(OPT_FILE, SCE_O_RDONLY, 0);
     if (fd >= 0) {
         int len = sceIoRead(fd, buf, sizeof(buf) - 1);
         sceIoClose(fd);
+        if (len == (int)sizeof(buf) - 1) {
+            static int warned;
+            if (!warned++)
+                diag("opt.txt: only the first %d bytes are read", len);
+        }
         int comment = 0;
         for (int i = 0; i < len; i++) {   // one key per line works too; # starts a comment
             if (buf[i] == '#')
@@ -765,6 +786,10 @@ static int input_thread(SceSize args, void *argp) {
                 char line[256];
                 opt_diag(line, sizeof(line));
                 diag("%us opt %d (%d) %s", secs, g_opt, g_opt_on, line);
+                for (int part = 0; part < 4; part++) {
+                    opt_diag2(line, sizeof(line), part);
+                    diag("%us opt %d (%d) %s", secs, g_opt, g_opt_on, line);
+                }
             }
         }
 
@@ -877,11 +902,15 @@ int module_start(SceSize argc, const void *args) {
             g_hook[HOOK_END], g_hook[HOOK_DQ], g_hook[HOOK_VBLANK], g_hook[HOOK_THREAD]);
     g_opt_on = g_opt == 2 ? 1 : g_opt;
     opt_file_load();
+    opt_set_scenes_tracked(g_hook[HOOK_BEGIN] >= 0 && g_hook[HOOK_END] >= 0);
     int opt = opt_init(info.modid, g_text_base, g_seg1, g_game->opt_matmul, g_game->cuts, &g_opt_on);
+    opt_set_stage_ptr(&g_cur_stage);
     {
         char line[256];
         opt_diag(line, sizeof(line));
         diag("optimizations: matmul %08X, %s", opt, line);
+        opt_diag2(line, sizeof(line), 0);
+        diag("optimizations: %s", line);
     }
     // dev tools, with the profiler kernel plugin installed (an unresolved import returns -1)
     if (divasplit_prof_stop() >= 0)
