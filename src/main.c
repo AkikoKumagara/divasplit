@@ -148,18 +148,15 @@ typedef struct {
 } game_t;
 
 // f 2nd EU 1.00 (docs/engine-notes.md "Main-thread cuts")
-// round 2 (opt.c "Round 2"); data: seg1 offsets of 0x81D1E2A8 (GL state), 0x81772644 (render
-// context TLS), 0x81C44DC4 (PV kick byte), 0x817717A4 (PvOsageManager), 0x81C62B54, 0x81C576C8
+// round 2 (opt.c "Round 2"); data: seg1 offsets of 0x81D1E2A8 (GL state) and 0x81772644
+// (render context TLS)
 static const opt_r2_t F2ND_R2 = {
-    .predraw = 0x4DF052, .predraw_ret2d = 0x4E11AA, .vbind = 0x4DE828, .fbind = 0x4DE706, .flush_tex = 0x4E185A,
+    .predraw = 0x4DF052, .predraw_ret2d = 0x4E11AA, .fbind = 0x4DE706, .flush_tex = 0x4E185A,
     .reserve_ret = 0x4DE8B8, .mat_patch = 0x4DEF28, .mat_get = 0x4DE314, .mvp_patch = 0x4DE994,
     .transpose = 0x4D1F44, .palette = 0x2472A0, .texparam = 0x4E1B30, .keyset_loop = 0x20462A,
-    .h2f = 0x4B1A48, .dsc_trace = 0x3367D2, .dsc_run = 0x336402, .dsc_ret = 0x31BA22, .base_kick = 0x35C71E,
-    .stub_tls = 0x65F768, .stub_memcpy = 0x65F5F8, .stub_set_vp = 0x65F068, .stub_set_fp = 0x65F1C8,
-    .stub_reserve_v = 0x65F198, .stub_reserve_f = 0x65F148, .stub_set_data_f = 0x65F0F8,
-    .stub_uaddr = 0x65F0A8, .stub_vaddr = 0x65EFE8,
-    .d_gl = 0x6032A8, .d_tls_render = 0x57644, .d_pv_kick = 0x529DC4, .d_osage = 0x567A4,
-    .d_rob_mgr = 0x547B54, .d_rob_chara = 0x53C6C8,
+    .h2f = 0x4B1A48, .dsc_trace = 0x3367D2,
+    .stub_tls = 0x65F768, .stub_set_vp = 0x65F068, .stub_uaddr = 0x65F0A8, .stub_vaddr = 0x65EFE8,
+    .d_gl = 0x6032A8, .d_tls_render = 0x57644,
 };
 static const opt_cuts_t F2ND_CUTS = {
     .centre = 0x245CDC, .mul44 = 0x4D0FDE, .inv44 = 0x4D0BE0, .xform = 0x4D1DC6,
@@ -383,7 +380,7 @@ static void log_flush(void) {
         sceIoMkdir(LOG_DIR, 0777);
         g_log_fd = sceIoOpen(LOG_FILE, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0666);
         if (g_log_fd >= 0) {
-            static const char hdr[] = "# divasplit 1.9 recording\n"
+            static const char hdr[] = "# divasplit 2.0 recording\n"
                 "t,game,preset,sync,avs,opt,late,fps,cpu,gpu,vs,3d,upd,a,b,c,draw,p,l,r,swap,"
                 "main_run,main_ready,main_wait,core0,core1,core2,core3,"
                 "up_copies,up_bytes,up_blocks,up_block_bytes,up_reused,up_reused_bytes,up_setdata,up_overflow,"
@@ -685,8 +682,7 @@ static void opt_file_load(void) {
     } KEYS[] = {{"centre", OPT_CENTRE}, {"dirty", OPT_DIRTY}, {"lsort", OPT_LSORT},
             {"nosort0", OPT_NOSORT0}, {"pin", OPT_PIN}, {"check", OPT_CHECK},
             {"ureuse", OPT_UREUSE}, {"matdup", OPT_MATDUP}, {"palette", OPT_PALETTE},
-            {"texwrap", OPT_TEXWRAP}, {"keyset", OPT_KEYSET}, {"h2f", OPT_H2F}, {"nolog", OPT_NOLOG},
-            {"earlykick", OPT_EARLYKICK}, {"ucopy", OPT_UCOPY}, {"ekcheck", OPT_EKCHECK}};
+            {"texwrap", OPT_TEXWRAP}, {"keyset", OPT_KEYSET}, {"h2f", OPT_H2F}, {"nolog", OPT_NOLOG}};
     static char buf[1024];   // the input thread, after module_start
     unsigned int mask = OPT_DEFAULT, ab = 0;
     SceUID fd = sceIoOpen(OPT_FILE, SCE_O_RDONLY, 0);
@@ -886,7 +882,7 @@ int module_start(SceSize argc, const void *args) {
     info.size = sizeof(info);
     g_start_time = sceKernelGetProcessTimeWide();
     if (taiGetModuleInfo(TAI_MAIN_MODULE, &info) < 0) {
-        diag("== divasplit 1.9: taiGetModuleInfo failed");
+        diag("== divasplit 2.0: taiGetModuleInfo failed");
         return SCE_KERNEL_START_SUCCESS;
     }
     for (int i = 0; i < GAME_COUNT; i++)
@@ -894,7 +890,7 @@ int module_start(SceSize argc, const void *args) {
             g_game = &GAMES[i];
     if (!g_game)
         return SCE_KERNEL_START_SUCCESS;   // not a build we know: do nothing
-    diag("== divasplit 1.9: %s nid %08X -> %s", info.name, (unsigned)info.module_nid, game_tag());
+    diag("== divasplit 2.0: %s nid %08X -> %s", info.name, (unsigned)info.module_nid, game_tag());
 
     // remembered settings; recording never carries over to a new session
     settings_load(&g_settings);

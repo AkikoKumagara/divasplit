@@ -67,8 +67,7 @@
  *           overdraw, but coplanar surfaces could flicker.
  *   pin     the core pinning experiment (threadview.c), off by default.
  *
- * Round 2 (further down): ureuse, matdup, palette, texwrap, keyset, h2f, nolog,
- * and the experiments earlykick and ucopy.
+ * Round 2 (further down): ureuse, matdup, palette, texwrap, keyset, h2f, nolog.
  */
 #include <arm_neon.h>
 #include <psp2/gxm.h>
@@ -444,13 +443,11 @@ static void *dirty_clear(void *p, int c, unsigned int n) {
  *           all 65536 inputs at start (before and after patching).
  *   nolog   The DSC player formats a debug trace line for every command into a
  *           ring nothing reads: branch at 0x3367D2 made a nop.
- *   earlykick (off by default, validate first) kick ROB_BASE right after the
- *           DSC interpreter instead of after the PV update tail. ekcheck
- *           (with earlykick off) hashes the robot state at both points.
- *   ucopy   (off by default, timing experiment) uniform copies with aligned
- *           NEON stores instead of one SceLibc memcpy per parameter.
- *   h2f and nolog are patched at start if set then, and stay for the session;
- *   earlykick, ekcheck and ucopy are hooked only if set at start.
+ *   h2f and nolog are patched at start if set then, and stay for the session.
+ *
+ * Tried and removed (docs/engine-notes.md): an early ROB_BASE kick after the
+ * DSC interpreter (its gate never opened in play) and NEON copies for the
+ * uniform uploads (no faster: the ring costs per byte).
  */
 
 // TAI_CONTINUE calls through an unprototyped pointer: a float argument is
@@ -482,10 +479,6 @@ static inline int stage_idx(void) {
 typedef void (*void_fn)(void);
 typedef void (*fbind_fn)(uint8_t *fp, SceGxmContext *ctx, const uint8_t *src);
 typedef void (*setvp_fn)(SceGxmContext *ctx, const void *prog);
-typedef void (*setfp_fn)(SceGxmContext *ctx, const void *prog);
-typedef int (*reserve_fn)(SceGxmContext *ctx, void **buf);
-typedef int (*setdata_fn)(void *buf, const void *param, unsigned int off, unsigned int n, const float *src);
-typedef void *(*memcpy_fn)(void *d, const void *s, unsigned int n);
 typedef void *(*tls_fn)(const void *desc);
 typedef void (*matget_fn)(uint8_t *light, int face, int pname, void *dst);
 typedef void (*transpose_fn)(float *out, const float *in);
@@ -494,20 +487,14 @@ typedef float (*h2f_fn)(uint32_t h);
 static void_fn s_flush_tex;
 static fbind_fn s_fbind;
 static setvp_fn s_set_vp;
-static setfp_fn s_set_fp;
-static reserve_fn s_res_v, s_res_f;
-static setdata_fn s_set_data_f;
-static memcpy_fn s_gmemcpy;
 static tls_fn s_tls;
 static matget_fn s_matget;
 static transpose_fn s_transpose;
 static addrmode_fn s_set_uaddr, s_set_vaddr;
 
-// shutdown releases from the last: a hook that calls through another's ref
-// (DSC -> KICK) comes after it
-enum { R2_PRE, R2_URES, R2_PAL, R2_TEX, R2_KS, R2_KICK, R2_DSC, R2_VBIND, R2_FBIND, R2_HOOKS };
+enum { R2_PRE, R2_URES, R2_PAL, R2_TEX, R2_KS, R2_HOOKS };
 static tai_hook_ref_t s_r2ref[R2_HOOKS];
-static SceUID s_r2hook[R2_HOOKS] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
+static SceUID s_r2hook[R2_HOOKS] = {-1, -1, -1, -1, -1};
 enum { R2P_MAT, R2P_MVP, R2P_H2F, R2P_LOG, R2_PATCHES };
 static SceUID s_r2inj[R2_PATCHES] = {-1, -1, -1, -1};
 static int s_r2err[R2_PATCHES];            // why a patch is not in (0: it is, or not asked for)
@@ -907,218 +894,6 @@ static int h2f_selftest(void) {
 // rejoins at 0x3367D4 with the same r7
 static const uint8_t LOG_ORIG[2] = {0x13, 0xd1}, LOG_NEW[2] = {0x00, 0xbf};
 
-/* ---- earlykick (validate first) ------------------------------------------ */
-
-typedef uint64_t (*dsc_fn)(void *pl, int a1, int64_t t, float dt, uint32_t a5, uint32_t a6);
-static int s_ek_kicked;                    // kicked early this frame: skip the call at 0x5F1B56
-static uint32_t s_ek_state[4];             // ROB_MANAGER task state words at the early kick
-static uint32_t s_ek_hash;                 // ekcheck: rob state hash at the DSC return
-static int s_ek_hashed;
-static volatile uint32_t d_ek_kicks, d_ek_gated, d_ek_late, d_ek_lost, d_ek_chk, d_ek_chk_diff;
-
-// no PvOsageManager slot busy or ready: then the post-DSC performer block
-// (0x31BF34..0x31BFB2) does nothing this frame, no slot can become busy before
-// 0x5F1B56 (0x327708, its only in-song setter, is in that block), and
-// 0x34C9A4's own gate (0x327600) reads the same 0 both times
-static int ek_gate(void) {
-    const uint8_t *tbl = *(const uint8_t *const volatile *)(s_seg1 + s_r2->d_osage);
-    if (!tbl)
-        return 1;
-    for (int i = 0; i < 4; i++) {
-        const volatile uint8_t *s = tbl + i * 0x908;
-        if (s[0x878] | s[0x8E1])
-            return 0;
-    }
-    return 1;
-}
-
-static uint32_t ek_hash_rob(void) {   // FNV-1a over rob_chara[4] and the ROB_MANAGER task
-    uint32_t h = 2166136261u;
-    const uint8_t *rob = (const uint8_t *)(s_seg1 + s_r2->d_rob_chara);
-    const uint8_t *rm = (const uint8_t *)(s_seg1 + s_r2->d_rob_mgr);
-    for (int i = 0; i < 4 * 0x2C68; i += 4)
-        h = (h ^ *(const uint32_t *)(rob + i)) * 16777619u;
-    for (int i = 0; i < 0x300; i += 4)
-        h = (h ^ *(const uint32_t *)(rm + i)) * 16777619u;
-    return h;
-}
-
-// seg0+0x336402, the DSC player; 0x31B346 calls it at 0x31BA1E (normal path) and 0x31B458
-static uint64_t dsc_hook(void *pl, int a1, int64_t t, float dt, uint32_t a5, uint32_t a6) {
-    uint32_t ra = (uint32_t)__builtin_return_address(0);
-    uint64_t ret = TAI_NEXT(dsc_fn, s_r2ref[R2_DSC])(pl, a1, t, dt, a5, a6);
-    if (ra != ((s_seg0 + s_r2->dsc_ret) | 1) || !on_main()
-            || !*(const volatile uint8_t *)(s_seg1 + s_r2->d_pv_kick))   // 0x3256EC's result: no kick
-        return ret;
-    if (cut_on(OPT_EARLYKICK)) {
-        if (!ek_gate()) {
-            d_ek_gated++;
-            return ret;
-        }
-        TAI_CONTINUE(void, s_r2ref[R2_KICK]);   // the game's 0x35C71E, now
-        const uint32_t *rm = (const uint32_t *)(s_seg1 + s_r2->d_rob_mgr);
-        for (int i = 0; i < 4; i++)
-            s_ek_state[i] = rm[3 + i];           // task +0xC..+0x18 (0x141B8's state words)
-        s_ek_kicked = 1;
-        d_ek_kicks++;
-    } else if ((s_mask & OPT_EKCHECK) && ek_gate()) {
-        s_ek_hash = ek_hash_rob();
-        s_ek_hashed = 1;
-    }
-    return ret;
-}
-
-// seg0+0x35C71E, only caller 0x5F1B56 (PVGAME ctrl, after the PV update)
-static void kick_hook(void) {
-    if (s_ek_kicked) {
-        s_ek_kicked = 0;
-        // what the game's call here would have seen differently: a task state request
-        // (0x141B8 applies +0xC..+0x18) or a create / free request (list sizes +0x2CC,
-        // +0x2D8, drained by the ROB_MANAGER ctrl 0x35D602) made after the early kick
-        const uint32_t *rm = (const uint32_t *)(s_seg1 + s_r2->d_rob_mgr);
-        int late = rm[0x2CC / 4] != 0 || rm[0x2D8 / 4] != 0;
-        for (int i = 0; i < 4; i++)
-            late |= rm[3 + i] != s_ek_state[i];
-        if (late)
-            d_ek_late++;
-        return;
-    }
-    if (s_ek_hashed) {
-        s_ek_hashed = 0;
-        d_ek_chk++;
-        if (ek_hash_rob() != s_ek_hash)          // the PV update tail wrote rob state
-            d_ek_chk_diff++;
-    }
-    TAI_CONTINUE(void, s_r2ref[R2_KICK]);
-}
-
-/* ---- ucopy (timing experiment, off by default) --------------------------- */
-
-static volatile uint32_t d_uc_vbind;
-
-// memcpy(d, s, n) for word-aligned d, s, n: ascending stores, 32/16-byte NEON
-// stores aligned to their size (the ring is written in whole bursts)
-static inline __attribute__((always_inline)) void ucopy(uint8_t *d, const uint8_t *s, uint32_t n) {
-    if ((((uintptr_t)d | (uintptr_t)s | n) & 3) != 0) {
-        s_gmemcpy(d, s, n);   // never seen: memcpy's semantics for anything else
-        return;
-    }
-    while (n != 0 && ((uintptr_t)d & 31) != 0) {
-        *(uint32_t *)d = *(const uint32_t *)s;
-        d += 4;
-        s += 4;
-        n -= 4;
-    }
-    uint32_t blocks = n >> 6;
-    if (blocks != 0)
-        __asm__ volatile(
-                "1:\n\t"
-                "vld1.32 {d0-d3}, [%[s]]!\n\t"
-                "vld1.32 {d4-d7}, [%[s]]!\n\t"
-                "subs    %[k], %[k], #1\n\t"
-                "vst1.64 {d0-d3}, [%[d]:256]!\n\t"
-                "vst1.64 {d4-d7}, [%[d]:256]!\n\t"
-                "bne     1b"
-                : [d] "+r"(d), [s] "+r"(s), [k] "+r"(blocks)
-                :
-                : "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "cc", "memory");
-    if (n & 32)
-        __asm__ volatile("vld1.32 {d0-d3}, [%[s]]!\n\t"
-                         "vst1.64 {d0-d3}, [%[d]:256]!"
-                         : [d] "+r"(d), [s] "+r"(s) : : "d0", "d1", "d2", "d3", "memory");
-    if (n & 16)
-        __asm__ volatile("vld1.32 {d0-d1}, [%[s]]!\n\t"
-                         "vst1.64 {d0-d1}, [%[d]:128]!"
-                         : [d] "+r"(d), [s] "+r"(s) : : "d0", "d1", "memory");
-    for (n &= 15; n != 0; n -= 4) {
-        *(uint32_t *)d = *(const uint32_t *)s;
-        d += 4;
-        s += 4;
-    }
-}
-
-// the game's upload loop (0x4DE8C4..0x4DE90A / 0x4DE79A..0x4DE7DE): first entry
-// unconditionally (count checked non-zero), count re-read every pass
-static inline __attribute__((always_inline)) void uc_upload(void *buf, const uint8_t *src,
-        const uint32_t *e, const volatile uint32_t *count) {
-    uint32_t i = 0;
-    do {
-        uint32_t c = e[3 * i + 2], sz = c & 0x7FFFFFFFu;
-        if (c & 0x80000000u)
-            s_set_data_f(buf, (const void *)e[3 * i], 0, sz, (const float *)(src + e[3 * i + 1] * 4));
-        else
-            ucopy((uint8_t *)buf + e[3 * i], src + e[3 * i + 1], sz);
-    } while (++i < *count);
-}
-
-// seg0+0x4DE706(fp, ctx, src), callers 0x4DE934 and 0x4E05CC
-static void fbind_hook(uint8_t *fp, SceGxmContext *ctx, const uint8_t *src) {
-    if (!cut_on(OPT_UCOPY)) {
-        TAI_CONTINUE(void, s_r2ref[R2_FBIND], fp, ctx, src);
-        return;
-    }
-    const uint8_t *s30 = s_g + 0x30000;
-    uint32_t k = 0;
-    if (s30[0xABC] != 0) {                     // 0x4DE728
-        uint32_t a = *(const volatile uint32_t *)(s30 + 0xAC0), b = *(const volatile uint32_t *)(s30 + 0xAC8);
-        if (a == 0x1F) {
-            if (b == 0x20) k = 1;
-            if (b == 0x1E) k = 2;
-            if (b == 1) k = 3;
-        } else if (a == 1) {
-            if (b == 0x20) k = 4;
-            if (b == 1) k = 5;
-        } else if (a == 0x1D) {
-            if (b == 1) k = 7;
-        } else if (a == 0x23) {
-            if (b == 0) k = 8;
-        }
-    }
-    const volatile uint32_t *slot = (const volatile uint32_t *)(fp + 8 + 4 * k);
-    s_set_fp(ctx, (const void *)*slot);        // 0x4DE768
-    const volatile uint32_t *count = (const volatile uint32_t *)(fp + 0x1AC);
-    if (*slot == 0 || *count == 0 || src == NULL)
-        return;
-    void *buf = NULL;
-    s_res_f(ctx, &buf);                        // result ignored, as the game
-    if (*count == 0)
-        return;
-    uc_upload(buf, src, (const uint32_t *)(fp + 0x2C), count);
-}
-
-// seg0+0x4DE828(T), only caller 0x4DF18A
-static void vbind_hook(uint8_t *t) {
-    if (!cut_on(OPT_UCOPY)) {
-        TAI_CONTINUE(void, s_r2ref[R2_VBIND], t);
-        return;
-    }
-    uint8_t *progs = *(uint8_t *const volatile *)(t + 0x1B50);
-    if (!progs)                                // 0x4DE846
-        return;
-    uint32_t vi = *(const volatile uint32_t *)(t + 0x1A18), fi = *(const volatile uint32_t *)(t + 0x1A1C);
-    ((volatile uint8_t *)t)[0x1A29] = 1;
-    ((volatile uint8_t *)t)[0x1A28] = 1;
-    SceGxmContext *ctx = *(SceGxmContext *const volatile *)(s_g + 0x3C);
-    uint8_t *vp = progs + vi * 0x368;
-    uint32_t var = *(const volatile uint32_t *)(s_g + 0x2CD2C) != 0;
-    s_set_vp(ctx, *(const void *const *)(vp + 0x2C + 4 * var));
-    const volatile uint32_t *count = (const volatile uint32_t *)(vp + 0x1B4);
-    if (*count != 0) {
-        void *buf = NULL;
-        int r = s_res_v(ctx, &buf);            // result ignored, as the game
-        if (s_ur_pend) {                       // ureuse: this is s_ur_key's block
-            s_ur_pend = 0;
-            if (r >= 0 && buf)
-                ur_record(buf);
-        }
-        if (*count != 0)
-            uc_upload(buf, R2_T(s_g), (const uint32_t *)(vp + 0x34), count);
-    }
-    d_uc_vbind++;
-    if (((volatile uint8_t *)t)[0x1A28] != 0)  // 0x4DE90C
-        s_fbind(progs + fi * 0x368 + 0x1B8, *(SceGxmContext *const volatile *)(s_g + 0x3C), R2_T(s_g) + 0x1350);
-}
-
 /* ---- install / diag ------------------------------------------------------ */
 
 void opt_set_stage_ptr(volatile const int *stage) {
@@ -1135,11 +910,6 @@ static void r2_frame(void) {
             s_main_hi = s_main_lo + (uint32_t)ti.stackSize;
         }
     }
-    if (s_ek_kicked) {   // early kick without the call at 0x5F1B56 (must stay 0)
-        s_ek_kicked = 0;
-        d_ek_lost++;
-    }
-    s_ek_hashed = 0;
 }
 
 static SceUID r2_inject(SceUID modid, int which, uint32_t off, const uint8_t *orig, int norig,
@@ -1163,11 +933,6 @@ static void r2_init(SceUID modid, const opt_r2_t *r2) {
     s_matget = (matget_fn)(s_seg0 + r2->mat_get + 1);
     s_transpose = (transpose_fn)(s_seg0 + r2->transpose + 1);
     s_set_vp = (setvp_fn)(s_seg0 + r2->stub_set_vp);
-    s_set_fp = (setfp_fn)(s_seg0 + r2->stub_set_fp);
-    s_res_v = (reserve_fn)(s_seg0 + r2->stub_reserve_v);
-    s_res_f = (reserve_fn)(s_seg0 + r2->stub_reserve_f);
-    s_set_data_f = (setdata_fn)(s_seg0 + r2->stub_set_data_f);
-    s_gmemcpy = (memcpy_fn)(s_seg0 + r2->stub_memcpy);
     s_tls = (tls_fn)(s_seg0 + r2->stub_tls);
     s_set_uaddr = (addrmode_fn)(s_seg0 + r2->stub_uaddr);
     s_set_vaddr = (addrmode_fn)(s_seg0 + r2->stub_vaddr);
@@ -1215,18 +980,6 @@ static void r2_init(SceUID modid, const opt_r2_t *r2) {
     s_r2hook[R2_PAL] = taiHookFunctionOffset(&s_r2ref[R2_PAL], modid, 0, r2->palette, 1, palette_hook);
     s_r2hook[R2_TEX] = taiHookFunctionOffset(&s_r2ref[R2_TEX], modid, 0, r2->texparam, 1, texparam_hook);
     s_r2hook[R2_KS] = taiHookFunctionOffset(&s_r2ref[R2_KS], modid, 0, r2->keyset_loop, 1, keyset_hook);
-    // the experiments are hooked only if asked for at start: off, the game runs without them
-    if (s_mask & (OPT_EARLYKICK | OPT_EKCHECK)) {
-        s_r2hook[R2_KICK] = taiHookFunctionOffset(&s_r2ref[R2_KICK], modid, 0, r2->base_kick, 1, kick_hook);
-        if (s_r2hook[R2_KICK] >= 0)
-            s_r2hook[R2_DSC] = taiHookFunctionOffset(&s_r2ref[R2_DSC], modid, 0, r2->dsc_run, 1, dsc_hook);
-    }
-    if (s_mask & OPT_UCOPY) {
-        // fragment first: once the vertex hook is in, it calls the fragment entry (hooked) itself
-        s_r2hook[R2_FBIND] = taiHookFunctionOffset(&s_r2ref[R2_FBIND], modid, 0, r2->fbind, 1, fbind_hook);
-        if (s_r2hook[R2_FBIND] >= 0)
-            s_r2hook[R2_VBIND] = taiHookFunctionOffset(&s_r2ref[R2_VBIND], modid, 0, r2->vbind, 1, vbind_hook);
-    }
 }
 
 static void r2_shutdown(void) {
@@ -1271,9 +1024,7 @@ int opt_diag2(char *buf, int size, int part) {
                 d_ur_st_skip[2], d_ur_st_calls[2], d_ur_st_skip[3], d_ur_st_calls[3],
                 d_ur_st_skip[4], d_ur_st_calls[4], d_ur_st_skip[5], d_ur_st_calls[5]);
     return sceClibSnprintf(buf, size,
-            "r2: mat %u mvp %u tex %u; earlykick %u gated %u late %u lost %u; ekcheck %u diff %u; ucopy %u",
-            d_mat_fast, d_mvp_fast, d_tex_fast,
-            d_ek_kicks, d_ek_gated, d_ek_late, d_ek_lost, d_ek_chk, d_ek_chk_diff, d_uc_vbind);
+            "r2: mat %u mvp %u tex %u", d_mat_fast, d_mvp_fast, d_tex_fast);
 }
 
 void opt_set_scenes_tracked(int ok) {

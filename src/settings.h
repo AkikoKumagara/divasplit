@@ -60,7 +60,8 @@ static inline void settings_defaults(settings_t *s) {
         s->game[i].avs = 0;
         s->game[i].bar = 1;
         s->game[i].rec = 0;
-        s->game[i].opt = 0;   // experiments only: none measured faster yet
+        // the engine optimizations exist for f 2nd only (opt.c)
+        s->game[i].opt = sceClibStrncmp(SETTINGS_GAME_TAG[i], "F2ND", 5) == 0;
     }
 }
 

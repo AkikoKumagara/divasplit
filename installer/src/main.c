@@ -38,7 +38,7 @@
 #include "font_ter_u14b.h"
 #include "edit.h"
 
-#define VERSION "1.9"
+#define VERSION "2.0"
 
 #define SCREEN_W 960
 #define SCREEN_H 544

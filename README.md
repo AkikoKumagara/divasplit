@@ -16,6 +16,7 @@ In any other game or version the plugin stays idle.
 
 - **AVS (adaptive vsync).** The games wait for the next screen refresh after every frame. A frame that takes even slightly longer than 16.7 ms then waits for the refresh after that, so a small slowdown becomes a drop straight from 60 to 30 fps. AVS skips that wait only when the frame is already late. A 17 ms frame stays 17 ms (about 58 fps instead of 30). It never goes above 60 fps, and frames are still flipped on vblank, so there is no tearing.
 - **SYNC (frame-drop catch-up).** The engines have a built-in mode that scales game time by target/measured fps, so notes and animation keep real-time speed when the frame rate drops. The games never turn it on; this plugin can.
+- **Engine optimizations (OPT, f 2nd).** Faster versions of the game's hottest per-frame work that give the same output: reusing 2D uniform data that hasn't changed, a cheaper sort-key calculation, fewer copies and calls per draw. On f 2nd's heaviest PV they save **4 ms of CPU per frame on stock clocks** and 1.6 ms overclocked. See [Engine optimizations](#engine-optimizations-opt).
 - **Split render presets.** Redraw the 3D world (PV) less often while notes and UI still redraw every frame. This trades PV smoothness for CPU and GPU time.
 - **Status bar** with fps and a per-frame timing breakdown: CPU work, waiting on the GPU, waiting for vblank, and 3D submit time.
 - **Recording.** One line per second goes to `ux0:data/divasplit/log.csv`.
@@ -71,7 +72,7 @@ Holding PS shows a *divasplit* section with these toggles:
 
 - AVS
 - SYNC
-- Engine optimizations (experiments, see below)
+- Engine optimizations (OPT, f 2nd)
 - Status bar
 - Recording
 - 3D preset button
@@ -88,9 +89,9 @@ Hold **L + R**, then press:
 | LEFT | AVS on / off |
 | UP | SYNC on / off |
 | DOWN | recording + thread view on / off (in X, also shows the game's own profiler) |
-| SELECT | experiments (OPT): off → on → A/B → off |
+| SELECT | engine optimizations (OPT): off → on → A/B → off |
 
-**OPT** switches the engine experiments in [What we measured](#what-we-measured). None of them made the game faster yet, so it's off by default and only the core pinning experiment is active. **A/B** switches OPT every second while recording; the `opt` column of `log.csv` says which way each second ran, so one recording compares both on nearly the same scenes.
+**OPT** switches the [engine optimizations](#engine-optimizations-opt) (f 2nd only; on by default there). **A/B** switches them every second while recording; the `opt` column of `log.csv` says which way each second ran, so one recording compares both on nearly the same scenes. When you're not recording, A/B acts like on.
 
 ## Presets
 
@@ -109,7 +110,7 @@ Hold **L + R**, then press:
 SPLIT OFF  SYNC OFF  AVS ON  58fps cpu 13.9 gpu 0.4 vs 2.4 3d 5.6
 ```
 
-All numbers are milliseconds per frame, averaged over one second. `REC` (or `REC+PROF` with the profiler running) shows while recording, `OPT` / `OPT A/B` when the experiments are on.
+All numbers are milliseconds per frame, averaged over one second. `REC` (or `REC+PROF` with the profiler running) shows while recording, `OPT` / `OPT A/B` when the optimizations are on.
 
 | Field | Meaning |
 |---|---|
@@ -121,7 +122,7 @@ All numbers are milliseconds per frame, averaged over one second. `REC` (or `REC
 `cpu + gpu + vs` equals the frame time. When fps drops:
 
 - **gpu grows:** the GPU is the bottleneck.
-- **cpu grows:** the CPU is. In practice, X is mostly GPU-bound and f 2nd is CPU-bound in its 3D stage.
+- **cpu grows:** the CPU is. In practice, X is mostly GPU-bound. f 2nd is CPU-bound without OPT; with OPT and AVS its heaviest PVs become GPU-bound.
 
 While recording, a second line shows the thread view:
 
@@ -141,7 +142,7 @@ A sampler thread checks the game about 1000 times a second, only while recording
 
 ## Recommended setup
 
-**AVS on, everything else off, with the CPU and GPU overclocked** (e.g. with PSVshell). This gave the best experience in testing. AVS alone removes the 60 → 30 drops, and the overclock covers most of the remaining dips.
+**AVS on and OPT on, everything else off, with the CPU and GPU overclocked** (e.g. with PSVshell). This gave the best experience in testing. AVS removes the 60 → 30 drops, OPT cuts the main thread's work, and the overclock covers most of the remaining dips. With OPT on, f 2nd's heaviest PVs are limited by the GPU, so the GPU overclock matters most.
 
 If you can't overclock, or a PV still drops a lot:
 - **A split preset** frees CPU and GPU time, but the PV redraws less smoothly. 3D 1/2 + AVS held f 2nd's heaviest PV at 59.7 fps on average.
@@ -188,6 +189,7 @@ The script lists any site it couldn't find for certain instead of guessing. A po
 | Path | Contents |
 |---|---|
 | `ux0:data/divasplit/settings.txt` | settings per game |
+| `ux0:data/divasplit/opt.txt` | optional: which [engine optimizations](#engine-optimizations-opt) OPT switches |
 | `ux0:data/divasplit/log.csv` | recordings (each run starts with a header line) |
 | `ux0:data/divasplit/threads.csv` | thread view, one block per second: `M` main thread state, `C` per core, `T` per thread (CPU % of one core), `W` what the main thread waits on |
 | `ux0:data/divasplit/diag.txt` | load diagnostics for the current session |
@@ -207,32 +209,71 @@ These are for finding out where the games spend their time. They're not needed t
 **On a PC** (`pip install capstone`, and the decrypted eboot of the same game):
 
 ```
-python3 tools/profview.py prof.bin eboot.bin.elf [--stage 3] [--thread 0]
+python3 tools/profview.py prof.bin eboot.bin.elf [--stage 3] [--thread 0] [--ab log.csv]
 python3 tools/perfetto.py prof.bin trace.bin eboot.bin.elf -o timeline.json --from 48 --to 53
+python3 tools/abcompare.py log.csv [--cols fps,cpu,st3,st5]
 ```
 
 - `profview.py`: milliseconds per frame by render stage, per function (self and with callees), for normal vs slow frames, and the system calls the game waited in. Functions come from the eboot's unwind table, so every sample maps to the function it was in.
 - `perfetto.py`: a timeline for [ui.perfetto.dev](https://ui.perfetto.dev): frames and render stages on top, then per thread a flame chart of what it ran and a row of its blocking calls. Keep the window to a few seconds; a whole song is a large file.
+- `abcompare.py`: an OPT A/B recording, each second compared with its neighbours in the other state, with an error bar. `log.csv` also has each render stage's CPU time (`st0`..`st7`).
+- `profview.py --ab log.csv`: the same profile split into the OPT off and on seconds of an A/B recording.
+
+Profiler times for code in the plugin itself can be misattributed: its stack scan sometimes picks up stale return addresses. Count samples by address range when it matters.
+
+## Engine optimizations (OPT)
+
+f 2nd EU 1.00 only. Each one replaces a piece of the game's per-frame work with a faster version that gives the same result. That was checked against the game's own code on a PC and with self-checks on the console. They were found with the profiler and measured with A/B recordings.
+
+| Key in `opt.txt` | What it does |
+|---|---|
+| `ureuse` | 2D draws (notes, UI, lyrics) upload a 4.9 KB block of shader constants each, and almost all of them are identical to the previous one. The engine already marks every change to that data, so when nothing changed the draw points at the block uploaded last time instead of copying it again. Cuts the notes/UI stage in half. |
+| `centre` | The 3D sort keys average each character's position over all its bones with two matrix products per bone. Summing the bones first needs only two products in total. |
+| `dirty` | Every draw clears 224 change flags one byte at a time; one `memset` instead. |
+| `lsort` | Sorting the draw lists allocates and frees 27 list heads from a locked heap every call; a merge sort that needs no allocation, with the same order. |
+| `matdup` | Per draw, ten tiny getter calls copy material colours, and a matrix product is computed twice; plain copies instead. |
+| `palette` | Bone matrices go to the shader constants with three function calls per bone; plain copies instead. |
+| `texwrap` | Texture wrap modes go through a three-level generic dispatch; the same writes, directly. |
+| `keyset` | The character threads' animation curve evaluation, with its inner calls inlined (same instructions, same results). |
+| `h2f` | Half → float conversion without its stack-guard overhead (checked for all 65,536 inputs at start). |
+| `nolog` | The PV script player formats a debug line for every command into a buffer nothing reads; skipped. |
+
+All are on by default. `ux0:data/divasplit/opt.txt` can switch single ones (`1` on, `0` off, `2` = on and the only one OPT A/B compares). It is re-read every 2 seconds; `h2f` and `nolog` only at game start. `check=1` makes `ureuse` and `centre` compare every result with the game's own (slow, for testing). `nosort0=1` skips sorting the opaque 3D list (changes draw order, off by default).
+
+**Measured** on f 2nd's heaviest PV, OPT A/B, about 200 paired seconds each:
+
+| Clocks | AVS | fps, OPT off → on | Main-thread CPU per frame, off → on |
+|---|---|---|---|
+| overclocked | off | 51.3 → **55.9** | 14.9 → 13.3 ms |
+| overclocked | on | 56.1 → **57.0** | 16.7 → 14.1 ms |
+| stock | off | 29.9 → **33.5** | 21.6 → 17.6 ms |
+| stock | on | 44.0 → **47.1** | 21.2 → 17.0 ms |
+
+- Overclocked with AVS off, the worst 10% of seconds went from 31.4 to 49.9 fps.
+- With AVS on, the time saved partly turns into waiting for the GPU: with OPT on, the GPU is what limits the heaviest PVs.
+- Without AVS, a frame that still takes more than 16.7 ms drops to 30 fps, which is why stock clocks with AVS off gain the least.
 
 ## What we measured
 
-Project DIVA f 2nd's heaviest PV, EU 1.00, profiled on the Vita. Times are the main thread's, in milliseconds per frame.
+Project DIVA f 2nd's heaviest PV, EU 1.00, profiled on the Vita. Times are the main thread's, in milliseconds per frame, without OPT.
 
 - **The main thread is the bottleneck.** In normal frames it works about 12 ms: game update ~3, the 3D world (render stage 3) ~5.5, 2D notes and UI ~2.5, post effects ~0.6. In slow frames only the 3D world grows (+1.8 ms); everything else stays the same.
 - **The other cores are mostly idle.** All game threads together use about 1.3 of the 3 cores games get.
 - **The main thread waits for its workers twice a frame.** It hands the frame's task list to three `diva_task_disp` workers and waits ~1.85 ms for them, then waits ~1 ms for the character threads (`RobThread`). The task workers use per-thread render contexts, and the engine only has three, the first being the main thread's own, so the main thread can't simply join in as a fourth worker.
-- **The 3D world's cost is per draw call**, spread over hundreds of small functions. The single biggest item is copying each draw's vertex uniforms (about 850 copies, 850 KB a frame) into uncached GPU memory: ~1.5 ms.
+- **The 3D world's cost is per draw call**, spread over hundreds of small functions. The single biggest item is copying each draw's shader constants (about 850 copies, 850 KB a frame) into uncached GPU memory: ~1.5 ms. Copying costs per byte there, so only not copying helps (`ureuse`).
 
-Experiments that did **not** help (all measured with A/B recordings, kept in the code, off):
+Experiments that did **not** help (measured with A/B recordings):
 
 | Experiment | Result |
 |---|---|
-| NEON version of the game's 4×4 matrix multiply (bit-identical) | slower: 1.26 ms against 0.8. The function is tiny and called thousands of times a frame; NEON loads of data the game just wrote with scalar stores stall. |
-| Reuse identical uniform blocks (54% of them repeat the previous draw's) | slower by ~0.8 ms: checking that data is unchanged costs about as much as writing it on the Vita |
+| NEON version of the game's 4×4 matrix multiply (bit-identical) | slower: 1.26 ms against 0.8. The function is tiny and called thousands of times a frame; NEON loads of data the game just wrote with scalar stores stall. Kept in the code, off. |
+| Reuse identical uniform blocks by comparing their data | slower by ~0.8 ms: comparing costs about as much as writing. `ureuse` avoids the comparison by reading the engine's own change marks. Kept in the code, off. |
+| Faster (aligned NEON) copies for the uniform uploads | no gain: the copies are limited by the GPU memory they write to. Removed. |
+| Kicking the character threads earlier in the frame | its safety condition never held during play. Removed. |
 | Main thread alone on its own core | slightly slower; it only waited for a free core ~2.5% of the frame |
 | Main thread as a fourth task worker | not possible without a fourth render context (see above) |
 
-So with this engine, the practical tools are AVS, overclocking and, for the worst PVs, a split preset. Engine-level ideas still open: a fourth worker context, and overlapping the two worker hand-offs. Details and addresses are in [`docs/engine-notes.md`](docs/engine-notes.md).
+With OPT on, what is left on f 2nd's main thread is mostly waiting for the worker threads, and the per-draw work of the 3D world. Details, addresses and the reverse-engineering notes are in [`docs/engine-notes.md`](docs/engine-notes.md).
 
 ## How it works
 
@@ -286,7 +327,12 @@ mkdir build && cd build
 cmake .. && make
 ```
 
-This produces `divasplit.suprx` (game plugin), `divasplit_qm.suprx` (Quick Menu plugin), `divasplit_prof.skprx` (profiler kernel plugin) and `divasplit_installer.vpk`. `installer/test/test_edit.c` tests the installer's file edits on a PC.
+This produces `divasplit.suprx` (game plugin), `divasplit_qm.suprx` (Quick Menu plugin), `divasplit_prof.skprx` (profiler kernel plugin) and `divasplit_installer.vpk`.
+
+Tests that run on a PC:
+- `installer/test/test_edit.c`: the installer's file edits.
+- `test/test_cuts.c`: `centre` and `lsort` against the game's versions, and the bytes of the `dirty` patch (`cc -O2 -ffp-contract=off -Isrc -o test_cuts test/test_cuts.c`).
+- `test/test_r2.c`: `h2f` for all inputs, and `keyset` against vectors made by emulating the game's own machine code (`./test_r2 test/vectors/keyset.txt`).
 
 ## Credits
 

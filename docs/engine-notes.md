@@ -142,8 +142,9 @@ obj+0xF48; render: base+0xC44, a live table).
 
 ## Main-thread cuts (OPT, `src/opt.c`)
 
-Found by static analysis, checked against the profiles; not yet measured on
-the console. Each is a key in `ux0:data/divasplit/opt.txt` (e.g. `centre=1
+Found by static analysis and the profiles, then measured on the console with
+A/B recordings (results below; the four-setup table at the end of this
+section is the summary). Each is a key in `ux0:data/divasplit/opt.txt` (e.g. `centre=1
 dirty=1 lsort=1 nosort0=0`); OPT and A/B switch the set. `test/test_cuts.c`
 checks `centre` and `lsort` on the host against the game's versions.
 
@@ -161,7 +162,7 @@ timed at start on the console, 224 bytes take 0.15 µs with it, 0.8 µs with
 an inline word loop and 2.8 µs with the game's byte loop. Still unexplained;
 log.csv now has each stage's CPU time (`st0`..`st7`) to locate it.
 
-Round 2 (on top of the above; profile ms, about 8% inflated by the sampler).
+Round 2 (on top of the above; expected savings in profile ms, about 8% inflated by the sampler).
 `test/test_r2.c` checks `keyset` and `h2f` on the host against vectors made by
 emulating the game's machine code.
 
@@ -174,11 +175,11 @@ emulating the game's machine code.
 | `keyset` | hook `0x20462A` (RobThreads) | ROB_BASE key-set evaluator `0x204334` inlined, the game's exact VFP sequence. Shortens the ROB_BASE join wait. | 0.06–0.1 ms |
 | `h2f` | 90-byte patch `0x4B1A48` | half → float without the stack-canary prologue; all 65536 inputs checked against the original at start, before and after patching. | ~0.03 ms (with `keyset` off) |
 | `nolog` | 2-byte patch `0x3367D2` | The DSC player formats a trace line per command into a ring nothing reads (`0x81773808`). | 0.01 / 0.02 ms |
-| `earlykick` | hooks `0x336402`, `0x35C71E` | Kick ROB_BASE right after the DSC interpreter instead of after the PV update tail, when no PvOsageManager slot is busy or ready. Not proven exact (indirect calls in the tail, late task requests): off by default; `ekcheck` hashes the robot state at both points first. | 0.15–0.2 ms × the share of frames it applies to |
-| `ucopy` | hooks `0x4DE828`, `0x4DE706` | Timing experiment: the bindings with aligned NEON copies instead of SceLibc `memcpy`. Off by default. | −0.05 … +0.35 ms |
+| ~~`earlykick`~~ (removed in 2.0) | hooks `0x336402`, `0x35C71E` | Kick ROB_BASE right after the DSC interpreter instead of after the PV update tail, when no PvOsageManager slot is busy or ready (`+0x878` / `+0x8E1` of the 4 slots at `*0x817717A4`). Not proven exact (indirect calls in the tail, late task requests). Its gate never opened in play. | 0.15–0.2 ms × the share of frames it applies to |
+| ~~`ucopy`~~ (removed in 2.0) | hooks `0x4DE828`, `0x4DE706` | Timing experiment: the bindings with aligned NEON copies instead of SceLibc `memcpy`. Measured: no gain. | −0.05 … +0.35 ms (measured ~0) |
 
-`h2f` and `nolog` are patched at start if set then; `earlykick`, `ekcheck`
-and `ucopy` are hooked only if set at start.
+`h2f` and `nolog` are patched at start if set then. The code of the two
+removed experiments is in the history (commit `d7d608b`).
 
 Validation run (2026-10-10, 3 songs, `check=1`, first 3 minutes in diag.txt):
 `ureuse` reused 255568 of 311603 2D pre-draws, every one compared with `T`,
