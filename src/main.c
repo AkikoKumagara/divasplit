@@ -155,17 +155,78 @@ typedef struct {
 // f 2nd EU 1.00 (docs/engine-notes.md "Main-thread cuts")
 // round 2 (opt.c "Round 2"); data: seg1 offsets of 0x81D1E2A8 (GL state) and 0x81772644
 // (render context TLS)
+// the flush's material copies, patched to call the plugin (f 2nd 0x4DEF28, r6 = G):
+// mov r0, r6; movw/movt ip, fn; blx ip; b.w 0x4DF004
+static const uint8_t F2ND_MAT_ORIG[16] = {0x5f, 0xf4, 0x09, 0x70, 0xc0, 0xf2, 0x03, 0x00,
+        0x33, 0x18, 0x38, 0x1c, 0x2a, 0x21, 0x40, 0xf2};
+static const uint8_t F2ND_MAT_HEAD[2] = {0x30, 0x46};
+static const uint8_t MAT_TAIL[6] = {0xe0, 0x47, 0x00, 0xf0, 0x66, 0xb8};   // both games: b.w +0xCC
+// the matrix upload's duplicate MVP (f 2nd 0x4DE994, r4 = matrix context, r7 = G):
+// adds.w r6, r4, #0x560; mov r0, r7; mov r1, r4; movw/movt ip, fn; blx ip; b.w 0x4DEAC2
+static const uint8_t F2ND_MVP_ORIG[22] = {0x28, 0x1c, 0x14, 0xf5, 0xac, 0x66, 0x80, 0xf1, 0xe6, 0xee, 0x00,
+        0x68, 0x00, 0xfb, 0x08, 0x70, 0xd0, 0xf8, 0x60, 0x25, 0xd0, 0xf8};
+static const uint8_t F2ND_MVP_HEAD[8] = {0x14, 0xf5, 0xac, 0x66, 0x38, 0x46, 0x21, 0x46};
+static const uint8_t F2ND_MVP_TAIL[6] = {0xe0, 0x47, 0x00, 0xf0, 0x8c, 0xb8};
 static const opt_r2_t F2ND_R2 = {
     .predraw = 0x4DF052, .predraw_ret2d = 0x4E11AA, .fbind = 0x4DE706, .flush_tex = 0x4E185A,
-    .reserve_ret = 0x4DE8B8, .mat_patch = 0x4DEF28, .mat_get = 0x4DE314, .mvp_patch = 0x4DE994,
+    .reserve_ret = 0x4DE8B8, .mat_get = 0x4DE314,
+    .mat = {0x4DEF28, F2ND_MAT_ORIG, 16, F2ND_MAT_HEAD, 2, MAT_TAIL},
+    .mvp = {0x4DE994, F2ND_MVP_ORIG, 22, F2ND_MVP_HEAD, 8, F2ND_MVP_TAIL},
     .transpose = 0x4D1F44, .palette = 0x2472A0, .texparam = 0x4E1B30, .keyset_loop = 0x20462A,
     .h2f = 0x4B1A48, .dsc_trace = 0x3367D2,
     .stub_tls = 0x65F768, .stub_set_vp = 0x65F068, .stub_uaddr = 0x65F0A8, .stub_vaddr = 0x65EFE8,
     .d_gl = 0x6032A8, .d_tls_render = 0x57644,
+    .u = {.t = 0x2EF24, .f = 0x30274, .rec = 0x368, .rec_vprog = 0x2C, .rec_entries = 0x34, .rec_count = 0x1B4,
+          .rec_frag = 0x1B8, .variant = 0x2CD2C, .mc = 0x24C, .mv = 0x560, .p = 0x574, .dprog = 0x6EC,
+          .dtex = 0x5AC, .mat_src = 0x30F14, .mat_t = 0x30224, .mat_f = 0x308B4, .mat_arg = 0x30A90,
+          .mvp_t = 0x10C0, .mvp_dup = 0x1000},
 };
-static const opt_cuts_t F2ND_CUTS = {
+// 0x4DF012..0x4DF031: for (i = 0; i < 0xE0; i++) if (t[0x1A2A + i]) t[0x1A2A + i] = 0;
+static const uint8_t F2ND_DIRTY_ORIG[32] = {
+    0x5f, 0xf0, 0x00, 0x0e,   // movs.w lr, #0
+    0x41, 0xf6, 0x2a, 0x22,   // movw r2, #0x1a2a
+    0x71, 0x46,               // mov r1, lr
+    0x0b, 0x1c,               // adds r3, r1, #0
+    0xa2, 0x18,               // adds r2, r4, r2
+    0x10, 0x78,               // ldrb r0, [r2]
+    0x00, 0xb1,               // cbz r0, +4
+    0x13, 0x70,               // strb r3, [r2]
+    0x0e, 0xf1, 0x01, 0x0e,   // add.w lr, lr, #1
+    0x01, 0x32,               // adds r2, #1
+    0xbe, 0xf1, 0xe0, 0x0f,   // cmp.w lr, #0xe0
+    0xf6, 0xd3}; static const opt_cuts_t F2ND_CUTS = {
     .centre = 0x245CDC, .mul44 = 0x4D0FDE, .inv44 = 0x4D0BE0, .xform = 0x4D1DC6,
-    .dirty_loop = 0x4DF012, .list_sort = 0x5ABB9C, .sort0_flag = 0x4478A1, .r2 = &F2ND_R2,
+    .dirty_loop = 0x4DF012, .dirty_orig = F2ND_DIRTY_ORIG, .dirty_len = 32,
+    .list_sort = 0x5ABB9C, .sort0_flag = 0x4478A1, .r2 = &F2ND_R2,
+};
+
+// f EU 1.00: the same engine generation, its own layout (G = seg1+0x2FC6B8, one
+// matrix context, records of 0x364, uniforms through SetUniformDataF)
+// 0x3D7F38: for (i = 0; i < 0xE0; i++) if (t[0x1A2A + i]) t[0x1A2A + i] = 0; (24 bytes)
+static const uint8_t F_DIRTY_ORIG[24] = {0x41, 0xf6, 0x2a, 0x22, 0x00, 0x23, 0xa2, 0x18, 0x19, 0x1c,
+        0x10, 0x78, 0x00, 0xb1, 0x11, 0x70, 0x01, 0x33, 0x01, 0x32, 0xe0, 0x2b, 0xf8, 0xd3};
+// 0x3D7E4E (r5 = G): mov r0, r5; movw/movt ip, fn; blx ip; b.w 0x3D7F2A
+static const uint8_t F_MAT_ORIG[16] = {0x4f, 0xf6, 0x48, 0x50, 0xc0, 0xf2, 0x02, 0x00,
+        0x2b, 0x18, 0x38, 0x1c, 0x2a, 0x21, 0x40, 0xf2};
+static const uint8_t F_G_HEAD[2] = {0x28, 0x46};
+// 0x3D7924 (r5 = G): mov r0, r5; movw/movt ip, fn; blx ip; b.w 0x3D7A22
+static const uint8_t F_MVP_ORIG[16] = {0x60, 0xac, 0xd5, 0xf8, 0x5c, 0x65, 0x20, 0x1c,
+        0xd5, 0xf8, 0x70, 0x75, 0xf4, 0xf7, 0x34, 0xf8};
+static const uint8_t F_MVP_TAIL[6] = {0xe0, 0x47, 0x00, 0xf0, 0x77, 0xb8};
+static const opt_r2_t F_R2 = {
+    .predraw = 0x3D805C, .predraw_ret2d = 0x3DA0B6, .fbind = 0x3D7652, .reserve_ret = 0x3D7FF0,
+    .mat_get = 0x3D70B6,
+    .mat = {0x3D7E4E, F_MAT_ORIG, 16, F_G_HEAD, 2, MAT_TAIL},
+    .mvp = {0x3D7924, F_MVP_ORIG, 16, F_G_HEAD, 2, F_MVP_TAIL},
+    .transpose = 0x3CE20C, .stub_set_vp = 0x5AA5E8, .d_gl = 0x2FC6B8,
+    .u = {.t = 0x2EA88, .f = 0x2FDD8, .rec = 0x364, .rec_vprog = 0x2C, .rec_entries = 0x30, .rec_count = 0x1B0,
+          .rec_frag = 0x1B4, .mv = 0x55C, .p = 0x570, .dprog = 0x6E8, .dtex = 0x5A8, .mat_src = 0x30A6C,
+          .mat_t = 0x2FD48, .mat_f = 0x30418, .mat_arg = 0x305E8, .mvp_t = 0x1310, .mvp_dup = 0x1000,
+          .fenv_int = 0x2BE394, .setdata = 1},
+};
+static const opt_cuts_t F_CUTS = {
+    .mul44 = 0x3CCB02, .inv44 = 0x3CC704, .xform = 0x3CE08E,
+    .dirty_loop = 0x3D7F38, .dirty_orig = F_DIRTY_ORIG, .dirty_len = 24, .r2 = &F_R2,
 };
 
 // the final blit of the 3D image and the framebuffer scene's begin (sharpen.c); the GL
@@ -180,7 +241,7 @@ static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
     {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0, {0}, NULL},
     // f: FM 0x816E7228, stage table 0x818F8B58 (seg1 0x81689000)
-    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}, NULL},
+    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}, &F_CUTS},
     // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
     // uniform reuse off (see opt.c); f 2nd's offsets: {0x4DE90A, 0x4DE8B8, 0x4DE8EA}
     {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS, &F2ND_SHARPEN, &F2ND_DRS},

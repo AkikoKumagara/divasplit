@@ -5,14 +5,43 @@
 #include <stdint.h>
 
 // f 2nd main-thread cuts (opt.c): seg0 offsets, seg1 for sort0_flag
+// every offset 0 = that cut doesn't exist for the game
 typedef struct {
     uint32_t centre;              // sort-key centre of a skinned object (bone average)
     uint32_t mul44, inv44, xform; // the game's matrix helpers it uses
     uint32_t dirty_loop;          // dirty-flag clear loop, patched to a memset
+    const uint8_t *dirty_orig;    // its original bytes: 32 (f 2nd) or 24 (f), cuts.h builds the patch
+    unsigned int dirty_len;
     uint32_t list_sort;           // std::list::sort of the draw lists
     uint32_t sort0_flag;          // stage table byte: sort the opaque list (seg1 offset)
     const struct opt_r2 *r2;      // round 2 cuts (NULL: none)
 } opt_cuts_t;
+
+// a code patch that calls the plugin: the original bytes are checked, then
+// head + movw/movt ip, fn + tail (blx ip; b.w back: 6 bytes) go in
+typedef struct {
+    uint32_t off;                 // seg0 offset (0: none)
+    const uint8_t *orig;
+    unsigned int norig;
+    const uint8_t *head;
+    unsigned int nhead;
+    const uint8_t *tail;
+} opt_callout_t;
+
+// the engine's uniform system, for ureuse and matdup: G offsets unless noted
+typedef struct {
+    uint32_t t, f;                // the vertex and fragment uniform tables T and F
+    uint32_t rec, rec_vprog, rec_entries, rec_count, rec_frag;   // program records: stride, fields
+    uint32_t variant;             // the vertex program variant word (0: no variants)
+    uint32_t mc;                  // matrix context stride per render context (0: one, at G)
+    uint32_t mv, p, dprog, dtex;  // in it: MV / P pointers, program / texture matrix dirty bytes
+    uint32_t mat_src, mat_t, mat_f, mat_arg;   // material colours: source, copies in T and F, getter's arg
+    uint32_t mvp_t;               // T offset of the MVP the per-draw setup stores
+    uint32_t mvp_dup;             // T offset of the duplicate the matrix upload computes
+    uint32_t fenv_int;            // seg1 offset of an int the flush stores as a float at F+0x280 (0: none)
+    int setdata;                  // entries {param, source float, count} for SetUniformDataF (f),
+                                  // else {destination byte, source byte, bytes | flag} (f 2nd)
+} opt_ulayout_t;
 
 // round 2 cuts (opt.c "Round 2"): seg0 offsets unless named d_ (seg1 offsets)
 typedef struct opt_r2 {
@@ -21,9 +50,9 @@ typedef struct opt_r2 {
     uint32_t fbind;          // fragment uniform binding
     uint32_t flush_tex;      // fragment textures, the flush's last call
     uint32_t reserve_ret;    // return address of the vertex reserve in vbind
-    uint32_t mat_patch;      // the flush's ten material copies (16 bytes patched)
+    opt_callout_t mat;       // the flush's ten material copies
     uint32_t mat_get;        // the material getter they call
-    uint32_t mvp_patch;      // the duplicate MVP in the matrix upload (22 bytes patched)
+    opt_callout_t mvp;       // the duplicate MVP in the matrix upload
     uint32_t transpose;      // 4x4 transpose (out, in)
     uint32_t palette;        // bone palette upload (bones, n)
     uint32_t texparam;       // texParameteri (target, pname, value)
@@ -32,7 +61,8 @@ typedef struct opt_r2 {
     uint32_t dsc_trace;      // DSC trace-log branch (2 bytes)
     uint32_t stub_tls, stub_set_vp, stub_uaddr, stub_vaddr;   // the game's import stubs (ARM)
     uint32_t d_gl;           // the engine's GL state "G"
-    uint32_t d_tls_render;   // TLS descriptor of the render-context index
+    uint32_t d_tls_render;   // TLS descriptor of the render-context index (0: one context)
+    opt_ulayout_t u;         // the uniform system's layout
 } opt_r2_t;
 
 // which cuts OPT switches on (ux0:data/divasplit/opt.txt)

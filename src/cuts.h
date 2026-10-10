@@ -145,6 +145,20 @@ static inline void cuts_dirty_patch(uint8_t out[32], uint32_t fn_thumb) {
         out[18 + i] = tail[i];
 }
 
+// f (PCSB00419) seg0+0x3D7F38: the same 224-byte loop in 24 bytes (r4 = T, r5 = G
+// callee-saved; afterwards only r1 = 0 is used, at 0x3D7F54), so the call falls
+// through to 0x3D7F50: ...; blx ip; movs r1, #0; nop
+static inline void cuts_dirty_patch24(uint8_t out[24], uint32_t fn_thumb) {
+    static const uint8_t head[10] = {0x41, 0xf6, 0x2a, 0x20, 0x20, 0x44, 0x00, 0x21, 0xe0, 0x22};
+    static const uint8_t tail[6] = {0xe0, 0x47, 0x00, 0x21, 0x00, 0xbf};
+    for (int i = 0; i < 10; i++)
+        out[i] = head[i];
+    cuts_thumb_movw(out + 10, 0, 12, fn_thumb & 0xFFFF);
+    cuts_thumb_movw(out + 14, 1, 12, fn_thumb >> 16);
+    for (int i = 0; i < 6; i++)
+        out[18 + i] = tail[i];
+}
+
 
 /*
  * Round 2: the ROB_BASE key-set evaluation, f 2nd seg0+0x204334 (one key set;

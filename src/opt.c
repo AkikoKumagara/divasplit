@@ -378,20 +378,7 @@ static void list_sort_hook(dlist_t *l, less_fn less) {
     d_sorts++;
 }
 
-// 0x4DF012..0x4DF031: for (i = 0; i < 0xE0; i++) if (t[0x1A2A + i]) t[0x1A2A + i] = 0;
-static const uint8_t DIRTY_ORIG[32] = {
-    0x5f, 0xf0, 0x00, 0x0e,   // movs.w lr, #0
-    0x41, 0xf6, 0x2a, 0x22,   // movw r2, #0x1a2a
-    0x71, 0x46,               // mov r1, lr
-    0x0b, 0x1c,               // adds r3, r1, #0
-    0xa2, 0x18,               // adds r2, r4, r2
-    0x10, 0x78,               // ldrb r0, [r2]
-    0x00, 0xb1,               // cbz r0, +4
-    0x13, 0x70,               // strb r3, [r2]
-    0x0e, 0xf1, 0x01, 0x0e,   // add.w lr, lr, #1
-    0x01, 0x32,               // adds r2, #1
-    0xbe, 0xf1, 0xe0, 0x0f,   // cmp.w lr, #0xe0
-    0xf6, 0xd3};              // blo loop
+             // blo loop
 // called by the patch (cuts.h) in place of that loop, from the main thread: the
 // game's loop with the cut off, one memset with it on (the same memory
 // afterwards; timed at start on the console: 0.15 us against the loop's 2.8).
@@ -459,8 +446,11 @@ static void *dirty_clear(void *p, int c, unsigned int n) {
         (fn_t)(n_ ? n_->func : h_->old); })
 
 static const opt_r2_t *s_r2;
-static uint8_t *s_g;                       // the engine's GL state; T = s_g + 0x2EF24
-#define R2_T(g) ((g) + 0x2EF24)
+static const opt_ulayout_t *s_u;           // the game's uniform system (opt.h)
+static uint8_t *s_g;                       // the engine's GL state; T = s_g + s_u->t
+#define R2_T(g) ((g) + s_u->t)
+#define R2_F(g) ((g) + s_u->f)
+#define STAGES 16
 static uintptr_t s_main_lo, s_main_hi;     // the main thread's stack (opt_frame)
 static volatile const int *s_rstage;       // main.c's render stage, counters only
 
@@ -472,7 +462,7 @@ static inline int on_main(void) {
 
 static inline int stage_idx(void) {
     int st = s_rstage ? *s_rstage : -1;
-    return st >= 0 && st < 8 ? st : 7;
+    return st >= 0 && st < STAGES ? st : STAGES - 1;
 }
 
 // the game's functions and import stubs (stubs are ARM: bit 0 clear)
@@ -502,8 +492,8 @@ static int s_r2err[R2_PATCHES];            // why a patch is not in (0: it is, o
 /* ---- ureuse ------------------------------------------------------------- */
 
 typedef struct {
-    const uint8_t *vp;     // program record: *(T+0x1B50) + index * 0x368
-    const void *prog;      // the SceGxmVertexProgram bound (variant [G+0x2CD2C] != 0)
+    const uint8_t *vp;     // program record: *(T+0x1B50) + index * record size
+    const void *prog;      // the SceGxmVertexProgram bound (f 2nd: variant [G+0x2CD2C] != 0)
     uint32_t n;            // parameter entries
     void *buf;             // its default uniform block in the GXM vertex ring
     uint32_t gen, scene;   // T's contents / the scene when it was uploaded
@@ -524,7 +514,7 @@ static uint32_t s_ur_ret2d;                // seg0 + predraw_ret2d | 1: called b
 static int s_ur_off;                       // a check failed: the game's path for the session
 static volatile uint32_t d_ur_calls, d_ur_dirty, d_ur_changed, d_ur_miss, d_ur_skip, d_ur_rec, d_ur_other;
 static volatile uint32_t d_ur_vchk, d_ur_vbad, d_ur_vna;
-static volatile uint32_t d_ur_st_calls[8], d_ur_st_skip[8];
+static volatile uint32_t d_ur_st_calls[STAGES], d_ur_st_skip[STAGES];
 
 // the setters' flags since the last flush: 224 vertex env bytes at T+0x1A2A
 // (2 mod 4), the 2 local bytes at T+0x1B2A and T+0x1B4C (cleared by the flush)
@@ -584,19 +574,35 @@ static int ur_reserve_hook(SceGxmContext *ctx, void **buf) {
     return r;
 }
 
-// the reused block against the bytes the game's copies would take from T now
+// the reused block against the bytes the game's upload would take from T now
 // (T is in cached memory, the block in the uncached ring). With the generation
 // unchanged, T before this flush is T after the flush that recorded the block,
 // so a difference means a T writer this file doesn't know about.
-// 0: same, 1: different, -1: a SetUniformDataF entry (not comparable here)
+//   f 2nd: entries {destination byte, T byte, bytes | bit 31: SetUniformDataF}
+//   f:     entries {parameter, T float, floats}, all through SetUniformDataF:
+//          F32 parameters are compared at their register (resource index * 4)
+// 0: same, 1: different, -1: an entry this can't compare
 static int ur_check(const uint8_t *vp, uint32_t n, const uint8_t *buf, const uint8_t *t) {
-    const uint32_t *e = (const uint32_t *)(vp + 0x34);   // {dst offset, T offset, bytes} (0x4DE8C4)
+    const uint32_t *e = (const uint32_t *)(vp + s_u->rec_entries);
     int r = 0;
     for (uint32_t i = 0; i < n; i++, e += 3) {
-        if (e[2] >> 31)
+        if (s_u->setdata) {
+            const SceGxmProgramParameter *pp = (const SceGxmProgramParameter *)e[0];
+            if (!pp)
+                continue;
+            if (sceGxmProgramParameterGetType(pp) != SCE_GXM_PARAMETER_TYPE_F32) {
+                r = -1;
+                continue;
+            }
+            uint32_t cap = sceGxmProgramParameterGetComponentCount(pp) * sceGxmProgramParameterGetArraySize(pp);
+            uint32_t cnt = e[2] < cap ? e[2] : cap;
+            if (sceClibMemcmp(buf + sceGxmProgramParameterGetResourceIndex(pp) * 4, t + e[1] * 4, cnt * 4) != 0)
+                return 1;
+        } else if (e[2] >> 31) {
             r = -1;
-        else if (sceClibMemcmp(buf + e[0], t + e[1], e[2]) != 0)
+        } else if (sceClibMemcmp(buf + e[0], t + e[1], e[2]) != 0) {
             return 1;
+        }
     }
     return r;
 }
@@ -616,17 +622,20 @@ static void predraw_hook(void) {
         TAI_CONTINUE(void, s_r2ref[R2_PRE]);
         return;
     }
-    if (!s_ur_ctxi)   // as 0x4DF072: __tls_get_addr(desc), then the int there
-        s_ur_ctxi = (volatile int *)s_tls((const void *)(s_seg1 + s_r2->d_tls_render));
+    const uint8_t *mc = g;   // matrix context: f has one, at G
+    if (s_u->mc) {           // f 2nd, as 0x4DF072: __tls_get_addr(desc), then the int there
+        if (!s_ur_ctxi)
+            s_ur_ctxi = (volatile int *)s_tls((const void *)(s_seg1 + s_r2->d_tls_render));
+        mc = g + s_u->mc * *s_ur_ctxi;
+    }
     int st = stage_idx();
     d_ur_calls++;
     d_ur_st_calls[st]++;
-    const uint8_t *mc = g + 0x24C * *s_ur_ctxi;   // matrix context, as 0x4DF07C
     uint32_t dirty = 0;
     for (int i = 0; i < 9; i++)
-        dirty |= mc[0x6EC + 0x14 * i];   // program matrices (0x4DEB26)
+        dirty |= mc[s_u->dprog + 0x14 * i];   // program matrices (f 2nd 0x4DEB26)
     for (int i = 0; i < 8; i++)
-        dirty |= mc[0x5AC + 0x14 * i];   // texture matrices (0x4DEDB6)
+        dirty |= mc[s_u->dtex + 0x14 * i];    // texture matrices (f 2nd 0x4DEDB6)
     if (ur_flags(t) | dirty) {
         // a setter or matrix op ran: this flush changes T. The next call compares
         // against nothing (snapshot dropped), so it bumps the generation again,
@@ -637,13 +646,14 @@ static void predraw_hook(void) {
         TAI_CONTINUE(void, s_r2ref[R2_PRE]);
         return;
     }
-    const uint8_t *vp = progs + *(const volatile uint32_t *)(t + 0x1A18) * 0x368;
-    int var = *(const volatile uint32_t *)(g + 0x2CD2C) != 0;   // 0x4D9144(G+0x2CB80, 15)
-    const void *prog = *(const void *const volatile *)(vp + 0x2C + 4 * var);
-    uint32_t n = *(const volatile uint32_t *)(vp + 0x1B4);
-    const uint32_t *mv = *(const uint32_t *const volatile *)(mc + 0x560);
-    const uint32_t *p = *(const uint32_t *const volatile *)(mc + 0x574);
-    const uint32_t *mat = (const uint32_t *)(g + 0x30F14);   // material colours, 0x4DE314's source
+    const uint8_t *vp = progs + *(const volatile uint32_t *)(t + 0x1A18) * s_u->rec;
+    // f 2nd: 0x4D9144(G+0x2CB80, 15) picks one of two vertex programs
+    int var = s_u->variant && *(const volatile uint32_t *)(g + s_u->variant) != 0;
+    const void *prog = *(const void *const volatile *)(vp + s_u->rec_vprog + 4 * var);
+    uint32_t n = *(const volatile uint32_t *)(vp + s_u->rec_count);
+    const uint32_t *mv = *(const uint32_t *const volatile *)(mc + s_u->mv);
+    const uint32_t *p = *(const uint32_t *const volatile *)(mc + s_u->p);
+    const uint32_t *mat = (const uint32_t *)(g + s_u->mat_src);   // material colours, the getter's source
     ublk_t *b = NULL;
     if (s_ur_snap && progs == s_ur_progs
             && (ur_diff(mv, s_ur_mv, 16) | ur_diff(p, s_ur_p, 16) | ur_diff(mat, s_ur_mat, 20)) == 0) {
@@ -683,33 +693,30 @@ static void predraw_hook(void) {
         return;
     }
     // skip: the flush would write the same bytes and clear flags that are 0;
-    // what is left of it and of 0x4DE828 is GXM state, in the game's order
-    s_flush_tex();                                    // 0x4DF048: bl 0x4E185A
-    ((volatile uint8_t *)t)[0x1A29] = 1;              // 0x4DE85A
-    ((volatile uint8_t *)t)[0x1A28] = 1;              // 0x4DE862
+    // what is left of it and of the vertex binding is GXM state, in the game's order
+    if (s_flush_tex)
+        s_flush_tex();                                // f 2nd 0x4DF048: bl 0x4E185A
+    ((volatile uint8_t *)t)[0x1A29] = 1;              // f 2nd 0x4DE85A
+    ((volatile uint8_t *)t)[0x1A28] = 1;              // f 2nd 0x4DE862
     SceGxmContext *ctx = *(SceGxmContext *const volatile *)(g + 0x3C);
-    s_set_vp(ctx, prog);                              // 0x4DE88E
+    s_set_vp(ctx, prog);                              // f 2nd 0x4DE88E
     sceGxmSetVertexDefaultUniformBuffer(ctx, b->buf); // in place of reserve + copies
+    if (s_u->fenv_int) {   // f's flush ends with F+0x280 = (float)int (0x3D7F66): the fragment block reads it
+        float v = (float)*(const volatile int *)(s_seg1 + s_u->fenv_int);
+        *(volatile float *)(R2_F(g) + 0x280) = v;
+    }
     uint32_t fi = *(const volatile uint32_t *)(t + 0x1A1C);
-    s_fbind((uint8_t *)progs + fi * 0x368 + 0x1B8, *(SceGxmContext *const volatile *)(g + 0x3C),
-            g + 0x30274);                             // 0x4DE934
+    s_fbind((uint8_t *)progs + fi * s_u->rec + s_u->rec_frag, *(SceGxmContext *const volatile *)(g + 0x3C),
+            R2_F(g));                                 // f 2nd 0x4DE934
     d_ur_skip++;
     d_ur_st_skip[st]++;
 }
 
 /* ---- matdup ------------------------------------------------------------- */
 
-// 0x4DEF28 (16 bytes, inside 0x4DEF04: r6 = G, r4/r5 kept): mov r0, r6; movw/movt ip, fn; blx ip; b.w 0x4DF004
-static const uint8_t MAT_ORIG[16] = {0x5f, 0xf4, 0x09, 0x70, 0xc0, 0xf2, 0x03, 0x00,
-        0x33, 0x18, 0x38, 0x1c, 0x2a, 0x21, 0x40, 0xf2};
-static const uint8_t MAT_HEAD[2] = {0x30, 0x46};
-static const uint8_t MAT_TAIL[6] = {0xe0, 0x47, 0x00, 0xf0, 0x66, 0xb8};
-// 0x4DE994 (22 bytes, inside 0x4DE954: r4 = matrix context, r7 = G):
-// adds.w r6, r4, #0x560; mov r0, r7; mov r1, r4; movw/movt ip, fn; blx ip; b.w 0x4DEAC2
-static const uint8_t MVP_ORIG[22] = {0x28, 0x1c, 0x14, 0xf5, 0xac, 0x66, 0x80, 0xf1, 0xe6, 0xee, 0x00,
-        0x68, 0x00, 0xfb, 0x08, 0x70, 0xd0, 0xf8, 0x60, 0x25, 0xd0, 0xf8};
-static const uint8_t MVP_HEAD[8] = {0x14, 0xf5, 0xac, 0x66, 0x38, 0x46, 0x21, 0x46};
-static const uint8_t MVP_TAIL[6] = {0xe0, 0x47, 0x00, 0xf0, 0x8c, 0xb8};
+// the patch shapes and their original bytes are per game (main.c): f 2nd
+// 0x4DEF28 (16 bytes, r6 = G) and 0x4DE994 (22 bytes, r7 = G, r4 = matrix
+// context); f 0x3D7E4E and 0x3D7924 (16 bytes each, r5 = G)
 static volatile uint32_t d_mat_fast, d_mvp_fast;
 
 // head; movw ip, #lo(fn); movt ip, #hi(fn); tail
@@ -725,15 +732,15 @@ static int r2_callout(uint8_t *o, const uint8_t *head, int nh, uint32_t fn, cons
     return k;
 }
 
-// called by the 0x4DEF28 patch, r0 = G: the ten 0x4DE314(G+0x30A90, 0x2A, pname, dst) calls
-// copy material colours G+0x30F14..0x30F64 (pnames 0x14F, 0x150, 0x151, 0x176, 0x177 ->
-// +0x484, +0x494, +0x4A4, +0x4B4, +0x4C4) to T+0x1300 (G+0x30224) and F+0x640 (G+0x308B4)
+// called by the material patch, r0 = G: the ten getter(G+mat_arg, 0x2A, pname, dst) calls
+// (f 2nd 0x4DE314) copy material colours G+mat_src.. (80 bytes: pnames 0x14F, 0x150,
+// 0x151, 0x176, 0x177 -> +0x484, +0x494, +0x4A4, +0x4B4, +0x4C4) to T and F
 // scalar copies: the flush runs right after VFP stores to the source, and NEON
 // loads of VFP-stored data stall (the reason the NEON matmul was slower)
 __attribute__((optimize("no-tree-vectorize"))) static void r2_matcopy(uint8_t *g) {
     if (cut_on(OPT_MATDUP)) {
-        const uint32_t *s = (const uint32_t *)(g + 0x30F14);
-        uint32_t *d1 = (uint32_t *)(g + 0x30224), *d2 = (uint32_t *)(g + 0x308B4);
+        const uint32_t *s = (const uint32_t *)(g + s_u->mat_src);
+        uint32_t *d1 = (uint32_t *)(g + s_u->mat_t), *d2 = (uint32_t *)(g + s_u->mat_f);
         for (int i = 0; i < 20; i++) {
             uint32_t v = s[i];
             d1[i] = v;
@@ -745,33 +752,36 @@ __attribute__((optimize("no-tree-vectorize"))) static void r2_matcopy(uint8_t *g
     static const uint16_t PN[5] = {0x14F, 0x150, 0x151, 0x176, 0x177};
     for (int k = 0; k < 2; k++)
         for (int i = 0; i < 5; i++)
-            s_matget(g + 0x30A90, 0x2A, PN[i], g + (k ? 0x308B4 : 0x30224) + 16 * i);
+            s_matget(g + s_u->mat_arg, 0x2A, PN[i], g + (k ? s_u->mat_f : s_u->mat_t) + 16 * i);
 }
 
-// called by the 0x4DE994 patch, r0 = G, r1 = matrix context: T+0x1000 = transpose(MV * P),
-// which 0x4DF052 computed with the same functions and inputs into T+0x10C0 (0x4DF174)
+// called by the MVP patch, r0 = G (f 2nd: r1 = matrix context; f has one, at G):
+// T+mvp_dup = transpose(MV * P), which the per-draw setup computed with the same
+// functions and inputs into T+mvp_t moments before (f 2nd 0x4DF174)
 __attribute__((optimize("no-tree-vectorize"))) static void r2_mvpdup(uint8_t *g, uint8_t *mc) {
     uint8_t *t = R2_T(g);
+    if (!s_u->mc)
+        mc = g;
     if (cut_on(OPT_MATDUP)) {
-        const uint32_t *s = (const uint32_t *)(t + 0x10C0);
-        uint32_t *d = (uint32_t *)(t + 0x1000);
+        const uint32_t *s = (const uint32_t *)(t + s_u->mvp_t);
+        uint32_t *d = (uint32_t *)(t + s_u->mvp_dup);
         for (int i = 0; i < 16; i++)
             d[i] = s[i];
         d_mvp_fast++;
         return;
     }
-    // the game's 0x4DE99A..0x4DEABE
+    // the game's own (f 2nd 0x4DE99A..0x4DEABE)
     float m[16] __attribute__((aligned(16))), c[16] __attribute__((aligned(16)));
     float o[16] __attribute__((aligned(16)));
-    const uint32_t *mv = *(const uint32_t *const *)(mc + 0x560);
+    const uint32_t *mv = *(const uint32_t *const *)(mc + s_u->mv);
     for (int i = 0; i < 16; i++)
         ((uint32_t *)m)[i] = mv[i];
-    s_mul(m, m, *(const float *const *)(mc + 0x574));
+    s_mul(m, m, *(const float *const *)(mc + s_u->p));
     for (int i = 0; i < 16; i++)
         ((uint32_t *)c)[i] = ((const uint32_t *)m)[i];
     s_transpose(o, c);
     for (int i = 0; i < 16; i++)
-        ((uint32_t *)(t + 0x1000))[i] = ((const uint32_t *)o)[i];
+        ((uint32_t *)(t + s_u->mvp_dup))[i] = ((const uint32_t *)o)[i];
 }
 
 /* ---- palette ------------------------------------------------------------ */
@@ -926,14 +936,15 @@ static SceUID r2_inject(SceUID modid, int which, uint32_t off, const uint8_t *or
 
 static void r2_init(SceUID modid, const opt_r2_t *r2) {
     s_r2 = r2;
+    s_u = &r2->u;
     s_g = (uint8_t *)(s_seg1 + r2->d_gl);
     uint8_t *t = R2_T(s_g);
-    s_flush_tex = (void_fn)(s_seg0 + r2->flush_tex + 1);
+    s_flush_tex = r2->flush_tex ? (void_fn)(s_seg0 + r2->flush_tex + 1) : NULL;
     s_fbind = (fbind_fn)(s_seg0 + r2->fbind + 1);
     s_matget = (matget_fn)(s_seg0 + r2->mat_get + 1);
     s_transpose = (transpose_fn)(s_seg0 + r2->transpose + 1);
     s_set_vp = (setvp_fn)(s_seg0 + r2->stub_set_vp);
-    s_tls = (tls_fn)(s_seg0 + r2->stub_tls);
+    s_tls = r2->stub_tls ? (tls_fn)(s_seg0 + r2->stub_tls) : NULL;
     s_set_uaddr = (addrmode_fn)(s_seg0 + r2->stub_uaddr);
     s_set_vaddr = (addrmode_fn)(s_seg0 + r2->stub_vaddr);
     s_ur_ret = (uint32_t)(s_seg0 + r2->reserve_ret) | 1;
@@ -941,11 +952,15 @@ static void r2_init(SceUID modid, const opt_r2_t *r2) {
 
     // code patches first (nothing has run yet), each after checking the bytes
     uint8_t buf[32];
-    int n = r2_callout(buf, MAT_HEAD, sizeof(MAT_HEAD), (uint32_t)(uintptr_t)r2_matcopy, MAT_TAIL);
-    s_r2inj[R2P_MAT] = r2_inject(modid, R2P_MAT, r2->mat_patch, MAT_ORIG, sizeof(MAT_ORIG), buf, n);
-    n = r2_callout(buf, MVP_HEAD, sizeof(MVP_HEAD), (uint32_t)(uintptr_t)r2_mvpdup, MVP_TAIL);
-    s_r2inj[R2P_MVP] = r2_inject(modid, R2P_MVP, r2->mvp_patch, MVP_ORIG, sizeof(MVP_ORIG), buf, n);
-    if (s_mask & OPT_H2F) {   // no run-time switch: in for the session if asked for at start
+    const opt_callout_t *co[2] = {&r2->mat, &r2->mvp};
+    const void *fn[2] = {(const void *)r2_matcopy, (const void *)r2_mvpdup};
+    for (int k = 0; k < 2; k++) {
+        if (!co[k]->off || co[k]->nhead + 14 > sizeof(buf))
+            continue;
+        int n = r2_callout(buf, co[k]->head, (int)co[k]->nhead, (uint32_t)(uintptr_t)fn[k], co[k]->tail);
+        s_r2inj[R2P_MAT + k] = r2_inject(modid, R2P_MAT + k, co[k]->off, co[k]->orig, (int)co[k]->norig, buf, n);
+    }
+    if ((s_mask & OPT_H2F) && r2->h2f) {   // no run-time switch: in for the session if asked for at start
         int e = h2f_selftest();
         if (e != 0) {
             s_r2err[R2P_H2F] = e;
@@ -965,21 +980,24 @@ static void r2_init(SceUID modid, const opt_r2_t *r2) {
             }
         }
     }
-    if (s_mask & OPT_NOLOG)
+    if ((s_mask & OPT_NOLOG) && r2->dsc_trace)
         s_r2inj[R2P_LOG] = r2_inject(modid, R2P_LOG, r2->dsc_trace, LOG_ORIG, 2, LOG_NEW, 2);
 
     // hooks. ureuse reads T's flags with word loads: only if they are aligned as
     // expected, and only if every scene start and end reaches probe_scene()
     // (a block must never be reused after GXM recycled its ring memory)
-    if (((uintptr_t)(t + 0x1A2C) & 3) == 0 && s_scenes_tracked) {
+    if (r2->predraw && ((uintptr_t)(t + 0x1A2C) & 3) == 0 && s_scenes_tracked && (!s_u->mc || s_tls)) {
         s_r2hook[R2_URES] = taiHookFunctionImport(&s_r2ref[R2_URES], TAI_MAIN_MODULE, NID_LIB_GXM,
                 NID_RESERVE_VDUB, ur_reserve_hook);
         if (s_r2hook[R2_URES] >= 0)
             s_r2hook[R2_PRE] = taiHookFunctionOffset(&s_r2ref[R2_PRE], modid, 0, r2->predraw, 1, predraw_hook);
     }
-    s_r2hook[R2_PAL] = taiHookFunctionOffset(&s_r2ref[R2_PAL], modid, 0, r2->palette, 1, palette_hook);
-    s_r2hook[R2_TEX] = taiHookFunctionOffset(&s_r2ref[R2_TEX], modid, 0, r2->texparam, 1, texparam_hook);
-    s_r2hook[R2_KS] = taiHookFunctionOffset(&s_r2ref[R2_KS], modid, 0, r2->keyset_loop, 1, keyset_hook);
+    if (r2->palette)
+        s_r2hook[R2_PAL] = taiHookFunctionOffset(&s_r2ref[R2_PAL], modid, 0, r2->palette, 1, palette_hook);
+    if (r2->texparam)
+        s_r2hook[R2_TEX] = taiHookFunctionOffset(&s_r2ref[R2_TEX], modid, 0, r2->texparam, 1, texparam_hook);
+    if (r2->keyset_loop)
+        s_r2hook[R2_KS] = taiHookFunctionOffset(&s_r2ref[R2_KS], modid, 0, r2->keyset_loop, 1, keyset_hook);
 }
 
 static void r2_shutdown(void) {
@@ -1019,10 +1037,13 @@ int opt_diag2(char *buf, int size, int part) {
                 "r2 ureuse%s: calls %u dirty %u changed %u miss %u skip %u rec %u 3d %u; check %u bad %u n/a %u",
                 s_ur_off ? " OFF (bad)" : "", d_ur_calls, d_ur_dirty, d_ur_changed, d_ur_miss, d_ur_skip, d_ur_rec,
                 d_ur_other, d_ur_vchk, d_ur_vbad, d_ur_vna);
-    if (part == 2)
-        return sceClibSnprintf(buf, size, "r2 ureuse skip/calls: s2 %u/%u s3 %u/%u s4 %u/%u s5 %u/%u",
-                d_ur_st_skip[2], d_ur_st_calls[2], d_ur_st_skip[3], d_ur_st_calls[3],
-                d_ur_st_skip[4], d_ur_st_calls[4], d_ur_st_skip[5], d_ur_st_calls[5]);
+    if (part == 2) {   // the stages that had 2D pre-draws
+        int n = sceClibSnprintf(buf, size, "r2 ureuse skip/calls:");
+        for (int st = 0; st < STAGES && n < size - 24; st++)
+            if (d_ur_st_calls[st])
+                n += sceClibSnprintf(buf + n, size - n, " s%d %u/%u", st, d_ur_st_skip[st], d_ur_st_calls[st]);
+        return n;
+    }
     return sceClibSnprintf(buf, size,
             "r2: mat %u mvp %u tex %u", d_mat_fast, d_mvp_fast, d_tex_fast);
 }
@@ -1095,12 +1116,20 @@ int opt_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, uint32_t matmul_off,
         s_mul = (mul44_fn)(seg0 + cuts->mul44 + 1);   // Thumb
         s_inv = (inv44_fn)(seg0 + cuts->inv44 + 1);
         s_xform = (xform_fn)(seg0 + cuts->xform + 1);
-        s_chook[CH_CENTRE] = taiHookFunctionOffset(&s_cref[CH_CENTRE], modid, 0, cuts->centre, 1, centre_hook);
-        s_chook[CH_LSORT] = taiHookFunctionOffset(&s_cref[CH_LSORT], modid, 0, cuts->list_sort, 1, list_sort_hook);
-        if (sceClibMemcmp((const void *)(seg0 + cuts->dirty_loop), DIRTY_ORIG, sizeof(DIRTY_ORIG)) == 0) {
+        if (cuts->centre)
+            s_chook[CH_CENTRE] = taiHookFunctionOffset(&s_cref[CH_CENTRE], modid, 0, cuts->centre, 1, centre_hook);
+        if (cuts->list_sort)
+            s_chook[CH_LSORT] = taiHookFunctionOffset(&s_cref[CH_LSORT], modid, 0, cuts->list_sort, 1,
+                    list_sort_hook);
+        if (!cuts->dirty_loop || !cuts->dirty_orig || (cuts->dirty_len != 32 && cuts->dirty_len != 24)) {
+            s_dirty_err = 0;   // none for this game
+        } else if (sceClibMemcmp((const void *)(seg0 + cuts->dirty_loop), cuts->dirty_orig, cuts->dirty_len) == 0) {
             uint8_t patch[32];
-            cuts_dirty_patch(patch, (uint32_t)(uintptr_t)dirty_clear);   // Thumb address (bit 0 set)
-            s_dirty_inj = taiInjectData(modid, 0, cuts->dirty_loop, patch, sizeof(patch));
+            if (cuts->dirty_len == 32)   // Thumb address (bit 0 set)
+                cuts_dirty_patch(patch, (uint32_t)(uintptr_t)dirty_clear);
+            else
+                cuts_dirty_patch24(patch, (uint32_t)(uintptr_t)dirty_clear);
+            s_dirty_inj = taiInjectData(modid, 0, cuts->dirty_loop, patch, cuts->dirty_len);
             if (s_dirty_inj < 0)
                 s_dirty_err = s_dirty_inj;
         } else {
