@@ -24,6 +24,7 @@ for name in sorted(os.listdir(src)):
         sys.exit(f'{name}: not a GXP program')
     sym = 'GXP_' + name[:-4].upper()
     lines.append(f'// {name}, {len(data)} bytes')
+    lines.append(f'#define HAVE_{sym} 1')
     lines.append(f'static const uint8_t {sym}[{len(data)}] __attribute__((aligned(16))) = {{')
     for i in range(0, len(data), 16):
         lines.append('    ' + ', '.join(f'0x{b:02x}' for b in data[i:i + 16]) + ',')

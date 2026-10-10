@@ -28,6 +28,7 @@
 #define SEPARATOR_ID ID("sep")
 #define TITLE_ID     ID("title")
 #define PRESET_ID    ID("preset")
+#define STYLE_ID     ID("style")
 
 enum { ROW_AVS, ROW_SYNC, ROW_OPT, ROW_DRS, ROW_SHARP, ROW_BAR, ROW_REC, ROW_COUNT };
 
@@ -39,7 +40,7 @@ static const char *const ROW_BOX[ROW_COUNT] = {ID("cb_avs"), ID("cb_sync"), ID("
         ID("cb_sharp"), ID("cb_bar"), ID("cb_rec")};
 static const char *const ROW_LABEL[ROW_COUNT] = {
     "Adaptive vsync (AVS)", "Frame-drop catch-up (SYNC)", "Engine optimizations", "Dynamic resolution (f, f 2nd)",
-    "Sharpen low-res 3D (f, f 2nd)", "Status bar", "Record to log.csv"};
+    "Sharpen 3D image (f, f 2nd)", "Status bar", "Record to log.csv"};
 
 static int *row_field(game_settings_t *gs, int row) {
     switch (row) {
@@ -59,6 +60,15 @@ static int current_game(const settings_t *s) {
 }
 
 static int g_menu_preset = 0;   // preset of the shown game, read when the title loads
+static int g_menu_style = 0;    // its sharpening style
+
+static const char *const STYLE_NAME[2] = {"adaptive", "classic"};
+
+static void set_style_label(int style) {
+    char label[64];
+    sceClibSnprintf(label, sizeof(label), "Sharpening: %s", STYLE_NAME[style ? 1 : 0]);
+    QuickMenuRebornSetWidgetLabel(STYLE_ID, label);
+}
 
 static void set_preset_label(int preset) {
     char label[64];
@@ -79,10 +89,15 @@ ONLOAD_HANDLER(on_title_load) {
     for (int row = 0; row < ROW_COUNT; row++)
         QuickMenuRebornSaveCheckBoxState(ROW_BOX[row], *row_field(&s.game[g], row) ? 1 : 0);
     g_menu_preset = s.game[g].preset;
+    g_menu_style = s.game[g].style;
 }
 
 ONLOAD_HANDLER(on_preset_load) {
     set_preset_label(g_menu_preset);
+}
+
+ONLOAD_HANDLER(on_style_load) {
+    set_style_label(g_menu_style);
 }
 
 BUTTON_HANDLER(on_checkbox) {
@@ -101,6 +116,15 @@ BUTTON_HANDLER(on_preset) {
     s.game[g].preset = (s.game[g].preset + 1) % PRESET_COUNT;
     settings_save(&s);
     set_preset_label(s.game[g].preset);
+}
+
+BUTTON_HANDLER(on_style) {
+    settings_t s;
+    settings_load(&s);
+    int g = current_game(&s);
+    s.game[g].style = !s.game[g].style;
+    settings_save(&s);
+    set_style_label(s.game[g].style);
 }
 
 void _start() __attribute__ ((weak, alias("module_start")));
@@ -139,10 +163,18 @@ int module_start(SceSize argc, const void *args) {
     QuickMenuRebornAssignOnLoadHandler(on_preset_load, PRESET_ID);
     set_preset_label(0);   // menu not shown yet: only stores the label
 
+    QuickMenuRebornRegisterWidget(STYLE_ID, NULL, button);
+    QuickMenuRebornSetWidgetSize(STYLE_ID, 400, 70, 0, 0);
+    QuickMenuRebornSetWidgetColor(STYLE_ID, 1, 1, 1, 1);
+    QuickMenuRebornRegisterEventHanlder(STYLE_ID, QMR_BUTTON_RELEASE_ID, on_style, NULL);
+    QuickMenuRebornAssignOnLoadHandler(on_style_load, STYLE_ID);
+    set_style_label(0);
+
     return SCE_KERNEL_START_SUCCESS;
 }
 
 int module_stop(SceSize argc, const void *args) {
+    QuickMenuRebornUnregisterWidget(STYLE_ID);
     QuickMenuRebornUnregisterWidget(PRESET_ID);
     for (int row = ROW_COUNT - 1; row >= 0; row--) {
         QuickMenuRebornUnregisterWidget(ROW_BOX[row]);

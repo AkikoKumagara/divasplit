@@ -111,4 +111,5 @@ vita_create_vpk(divasplit_installer.vpk DVSP00001 eboot.bin
   FILE vitagrafix/divaf2nd.txt payload/vitagrafix/divaf2nd.txt
   FILE shaders/blit_v.cg payload/shaders/blit_v.cg
   FILE shaders/sharpen_f.cg payload/shaders/sharpen_f.cg
+  FILE shaders/cas_f.cg payload/shaders/cas_f.cg
 )

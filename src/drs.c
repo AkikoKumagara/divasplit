@@ -24,9 +24,11 @@
  *
  * Controller, per frame, on the main thread's own timings: a frame is late
  * past 16.7 ms; GPU-bound when it also waited for the GPU (BeginScene /
- * EndScene / display queue). Half of 8 frames late and GPU-bound: one step
- * down at once, more when the GPU wait is long (fewer size changes). A second
- * with little GPU wait: one step up, whatever the frame rate (a lower
+ * EndScene / display queue) clearly more than the game's floor (its driver
+ * work when the GPU keeps up: f ~1 ms, f 2nd ~0.3 ms). Half of 8 frames late
+ * and GPU-bound, twice in a row and without a hitch (loading): one step down,
+ * more when the GPU wait is long (fewer size changes). A second with little
+ * GPU wait over the floor: one step up, whatever the frame rate (a lower
  * resolution doesn't help a frame the CPU makes late), but only after a hold
  * that doubles each time a step up is undone within two seconds (and resets
  * after ten quiet seconds).
@@ -39,8 +41,13 @@
 
 #define STEP 32          // width per level
 #define LATE_US 17200
-#define GPU_BOUND_US 2000    // a step down: late frames that also waited this long for the GPU
-#define GPU_FREE_US 800      // a step up: a second averaging less GPU wait than this
+// GPU waits are measured above the game's floor: the time its main thread spends in
+// the GXM calls when the GPU keeps up (driver work; f 2nd ~0.3 ms, f ~1 ms, 7 scenes)
+#define GPU_BOUND_US 2000    // a step down: late frames that also waited this much more for the GPU
+#define GPU_FREE_US 800      // a step up: a second averaging less than this over the floor
+#define FLOOR_MAX_US 2000    // a wait above this is the GPU's, never the floor
+#define FLOOR_RISE_US 25     // per second: the floor follows a wait that grew (scene change)
+#define HITCH_US 50000       // a window with a frame this long is a hitch (loading), not GPU load
 
 static tai_hook_ref_t s_ref;
 static const drs_game_t *s_game;
@@ -55,7 +62,8 @@ static int s_w;                  // width this frame (0: not applied)
 static int s_applied;            // this frame used our size: its timings count
 static volatile int s_enabled;   // the setting
 
-static unsigned int f_n, f_late, f_gpu, f_vs;        // down window (8 frames)
+static unsigned int f_n, f_late, f_gpu, f_vs, f_max;   // down window (8 frames)
+static unsigned int s_floor, s_bad;                  // the GPU wait floor; down windows in a row
 static unsigned int u_n, u_late, u_gpu, u_vs;        // up window (60 frames)
 static unsigned int s_up_hold = 120, s_since_change, s_since_up = 100000;
 static volatile unsigned int d_down, d_up, d_undone, d_minw = 9999, d_maxw;
@@ -135,7 +143,7 @@ void drs_stage(int stage, int after) {
 void drs_frame(unsigned int frame_us, unsigned int gpu_us, unsigned int vs_us) {
     if (!s_applied || frame_us > 200000) {   // not ours, or a stall (loading)
         f_n = u_n = 0;
-        f_late = u_late = f_gpu = u_gpu = f_vs = u_vs = 0;
+        f_late = u_late = f_gpu = u_gpu = f_vs = u_vs = f_max = s_bad = 0;
         return;
     }
     s_since_change++;
@@ -143,11 +151,16 @@ void drs_frame(unsigned int frame_us, unsigned int gpu_us, unsigned int vs_us) {
     int late = frame_us > LATE_US;
     f_n++, f_late += late, f_gpu += gpu_us, f_vs += vs_us;
     u_n++, u_late += late, u_gpu += gpu_us, u_vs += vs_us;
+    if (frame_us > f_max)
+        f_max = frame_us;
     if (f_n >= 8) {
-        unsigned int gpu = f_gpu / f_n;
-        if (f_late >= 4 && gpu > GPU_BOUND_US && s_level < levels()) {
+        unsigned int gpu = f_gpu / f_n, over = gpu > s_floor ? gpu - s_floor : 0;
+        // GPU-bound for two windows in a row, without a hitch in them
+        s_bad = f_late >= 4 && over > GPU_BOUND_US && f_max < HITCH_US ? s_bad + 1 : 0;
+        if (s_bad >= 2 && s_level < levels()) {
             // a step per 4 ms of GPU wait (32 px of width is ~9% of the pixels at 720)
-            int steps = 1 + (int)(gpu / 4000);
+            int steps = 1 + (int)(over / 4000);
+            s_bad = 0;
             s_level = s_level + steps > levels() ? levels() : s_level + steps;
             d_down++;
             if (s_since_up < 120) {   // the last step up didn't hold
@@ -159,10 +172,15 @@ void drs_frame(unsigned int frame_us, unsigned int gpu_us, unsigned int vs_us) {
             s_since_up = 100000;
             u_n = u_late = u_gpu = u_vs = 0;
         }
-        f_n = f_late = f_gpu = f_vs = 0;
+        f_n = f_late = f_gpu = f_vs = f_max = 0;
     }
     if (u_n >= 60) {
-        if (u_gpu / u_n < GPU_FREE_US && s_level > 0 && s_since_change >= s_up_hold) {
+        unsigned int avg = u_gpu / u_n;
+        // the floor: the lowest second seen, rising slowly to follow the game
+        s_floor = !s_floor || avg < s_floor + FLOOR_RISE_US ? avg : s_floor + FLOOR_RISE_US;
+        if (s_floor > FLOOR_MAX_US)
+            s_floor = FLOOR_MAX_US;
+        if (avg < s_floor + GPU_FREE_US && s_level > 0 && s_since_change >= s_up_hold) {
             s_level--;
             d_up++;
             s_since_change = 0;
@@ -248,7 +266,7 @@ void drs_shutdown(void) {
 
 int drs_diag(char *buf, int size) {
     return sceClibSnprintf(buf, size, "drs: hook %08X range %d..%d now %dx%d level %d; down %u up %u undone %u"
-            " (up hold %u frames), widths seen %u..%u; regions %u",
+            " (up hold %u frames), GPU wait floor %u us, widths seen %u..%u; regions %u",
             s_hook, s_min, s_max, s_w, s_w ? height_of(s_w) : 0, s_level, d_down, d_up, d_undone, s_up_hold,
-            d_minw == 9999 ? 0 : d_minw, d_maxw, d_regions);
+            s_floor, d_minw == 9999 ? 0 : d_minw, d_maxw, d_regions);
 }

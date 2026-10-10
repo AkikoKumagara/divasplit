@@ -26,6 +26,10 @@
  * Menus (drawn 1:1) are left alone. AMD's RCAS on the full-screen blit was
  * tried first: 12 ms of GPU time a frame on stock clocks, too much.
  *
+ * Two styles (the setting): adaptive, shaders/cas_f.cg (AMD CAS's weighting:
+ * less on edges that already have contrast, so stair-steps aren't hardened), and
+ * classic, shaders/sharpen_f.cg (a clamped unsharp mask). Without cas_f, classic.
+ *
  * Our programs: the .gxp files in ux0:data/divasplit/shaders/ when the installer compiled
  * them there (ur0:data/libshacccg.suprx), else the copies built in
  * (src/shaders_gxp.h, compiled the same way, tools/gxp2h.py).
@@ -55,11 +59,15 @@ static block_t s_b[B_COUNT];
 static int s_mapped[B_COUNT], s_vusse_map, s_fusse_map;
 static SceClibMspace s_host;
 static SceGxmShaderPatcher *s_patcher;
-static const SceGxmProgram *s_vprog, *s_fprog;
-static SceGxmShaderPatcherId s_vid, s_fid;
+enum { P_CLASSIC, P_ADAPTIVE, P_COUNT };   // the fragment programs (styles)
+static const char *const P_FILE[P_COUNT] = {"sharpen_f.gxp", "cas_f.gxp"};
+static const SceGxmProgram *s_vprog, *s_fprog[P_COUNT];
+static SceGxmShaderPatcherId s_vid, s_fid[P_COUNT];
 static SceGxmVertexProgram *s_vp;
-static SceGxmFragmentProgram *s_fp;
-static const SceGxmProgramParameter *s_u_rect, *s_u_k, *s_u_lim;
+static SceGxmFragmentProgram *s_fp[P_COUNT];
+static const SceGxmProgramParameter *s_u_rect, *s_u_k[P_COUNT], *s_u_lim[P_COUNT];
+static volatile int s_style = P_ADAPTIVE;   // the setting
+static int s_used = -1;                     // the style of the last pass
 static const float *s_quad;
 static const uint16_t *s_idx;
 static int s_state;   // 1 programs loaded and hooked, 2 GPU side ready too, < 0 why not
@@ -154,7 +162,7 @@ static const SceGxmProgram *load_gxp(const char *name, const uint8_t *builtin, u
         if (n > 0 && sceGxmProgramCheck((const SceGxmProgram *)dst) < 0)
             n = -1;
     }
-    if (n <= 0 && len <= s_b[B_PROGS].size - *off) {
+    if (n <= 0 && builtin && len <= s_b[B_PROGS].size - *off) {
         sceClibMemcpy(dst, builtin, len);
         n = (int)len;
         s_builtin++;
@@ -172,8 +180,13 @@ static int load(void) {
         return r;
     unsigned int off = 0;
     s_vprog = load_gxp("blit_v.gxp", GXP_BLIT_V, sizeof(GXP_BLIT_V), &off);
-    s_fprog = load_gxp("sharpen_f.gxp", GXP_SHARPEN_F, sizeof(GXP_SHARPEN_F), &off);
-    if (!s_vprog || !s_fprog)
+    s_fprog[P_CLASSIC] = load_gxp(P_FILE[P_CLASSIC], GXP_SHARPEN_F, sizeof(GXP_SHARPEN_F), &off);
+#ifdef HAVE_GXP_CAS_F
+    s_fprog[P_ADAPTIVE] = load_gxp(P_FILE[P_ADAPTIVE], GXP_CAS_F, sizeof(GXP_CAS_F), &off);
+#else
+    s_fprog[P_ADAPTIVE] = load_gxp(P_FILE[P_ADAPTIVE], NULL, 0, &off);   // only compiled by the installer yet
+#endif
+    if (!s_vprog || !s_fprog[P_CLASSIC])
         return -3;
     return 1;
 }
@@ -211,16 +224,13 @@ static int gpu_setup(void) {
     pp.fragmentUsseMemSize = s_b[B_FUSSE].size;
     pp.fragmentUsseOffset = foff;
     if ((r = sceGxmShaderPatcherCreate(&pp, &s_patcher)) < 0
-            || (r = sceGxmShaderPatcherRegisterProgram(s_patcher, s_vprog, &s_vid)) < 0
-            || (r = sceGxmShaderPatcherRegisterProgram(s_patcher, s_fprog, &s_fid)) < 0)
+            || (r = sceGxmShaderPatcherRegisterProgram(s_patcher, s_vprog, &s_vid)) < 0)
         return r;
 
     const SceGxmProgramParameter *pos = sceGxmProgramFindParameterByName(s_vprog, "position");
     const SceGxmProgramParameter *t = sceGxmProgramFindParameterByName(s_vprog, "t");
     s_u_rect = sceGxmProgramFindParameterByName(s_vprog, "rect");
-    s_u_k = sceGxmProgramFindParameterByName(s_fprog, "k");
-    s_u_lim = sceGxmProgramFindParameterByName(s_fprog, "lim");
-    if (!pos || !t || !s_u_rect || !s_u_k || !s_u_lim)
+    if (!pos || !t || !s_u_rect)
         return -4;
     SceGxmVertexAttribute attr[2];
     sceClibMemset(attr, 0, sizeof(attr));
@@ -234,9 +244,23 @@ static int gpu_setup(void) {
     SceGxmVertexStream stream = {16, SCE_GXM_INDEX_SOURCE_INDEX_16BIT};
     if ((r = sceGxmShaderPatcherCreateVertexProgram(s_patcher, s_vid, attr, 2, &stream, 1, &s_vp)) < 0)
         return r;
-    if ((r = sceGxmShaderPatcherCreateFragmentProgram(s_patcher, s_fid, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
-            SCE_GXM_MULTISAMPLE_NONE, NULL, s_vprog, &s_fp)) < 0)
-        return r;
+    // the styles: classic is needed, adaptive optional (classic is used without it)
+    for (int i = 0; i < P_COUNT; i++) {
+        if (!s_fprog[i])
+            continue;
+        const SceGxmProgram *fp = s_fprog[i];
+        s_u_k[i] = sceGxmProgramFindParameterByName(fp, "k");
+        s_u_lim[i] = sceGxmProgramFindParameterByName(fp, "lim");
+        if (!s_u_k[i] || !s_u_lim[i])
+            r = -4;
+        else if ((r = sceGxmShaderPatcherRegisterProgram(s_patcher, fp, &s_fid[i])) >= 0
+                && (r = sceGxmShaderPatcherCreateFragmentProgram(s_patcher, s_fid[i],
+                        SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4, SCE_GXM_MULTISAMPLE_NONE, NULL, s_vprog, &s_fp[i])) >= 0)
+            continue;
+        s_fp[i] = NULL;
+        if (i == P_CLASSIC)
+            return r;
+    }
 
     // the quad as a strip: clip-space corner, t (top-left = 0,0 = the image's (u0, v0))
     if ((r = gpu_alloc(B_QUAD, "divasplit_sh_quad", 4096)) < 0)
@@ -375,8 +399,10 @@ static int pass(SceGxmContext *ctx) {
     sceGxmSetCullMode(ctx, SCE_GXM_CULL_NONE);
     sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
     sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
+    int p = s_style == P_ADAPTIVE && s_fp[P_ADAPTIVE] ? P_ADAPTIVE : P_CLASSIC;
+    s_used = p;
     sceGxmSetVertexProgram(ctx, s_vp);
-    sceGxmSetFragmentProgram(ctx, s_fp);
+    sceGxmSetFragmentProgram(ctx, s_fp[p]);
     sceGxmSetFragmentTexture(ctx, 0, src);
     void *vb = NULL, *fb = NULL;
     sceGxmReserveVertexDefaultUniformBuffer(ctx, &vb);
@@ -384,11 +410,14 @@ static int pass(SceGxmContext *ctx) {
     if (vb && fb) {
         float rect[4] = {x0 / tw, y0 / th, x1 / tw, y1 / th};
         float hx = 0.5f / tw, hy = 0.5f / th;
-        float k[4] = {1.0f / tw, 1.0f / th, s_amount, s_over};
+        // classic: the unsharp amount (0..2) and overshoot; adaptive: CAS's peak weight
+        // (0..-0.2), the same sharpening as classic on soft detail at the same setting
+        float k[4] = {1.0f / tw, 1.0f / th, p == P_ADAPTIVE ? -0.1f * s_amount : s_amount,
+                p == P_ADAPTIVE ? 0.0f : s_over};
         float lim[4] = {rect[0] + hx, rect[1] + hy, rect[2] - hx, rect[3] - hy};
         sceGxmSetUniformDataF(vb, s_u_rect, 0, 4, rect);
-        sceGxmSetUniformDataF(fb, s_u_k, 0, 4, k);
-        sceGxmSetUniformDataF(fb, s_u_lim, 0, 4, lim);
+        sceGxmSetUniformDataF(fb, s_u_k[p], 0, 4, k);
+        sceGxmSetUniformDataF(fb, s_u_lim[p], 0, 4, lim);
         sceGxmSetVertexStream(ctx, 0, s_quad);
         sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLE_STRIP, SCE_GXM_INDEX_FORMAT_U16, s_idx, 4);
     }
@@ -488,8 +517,9 @@ void sharpen_shutdown(void) {
     if (s_patcher) {
         if (s_vp)
             sceGxmShaderPatcherReleaseVertexProgram(s_patcher, s_vp);
-        if (s_fp)
-            sceGxmShaderPatcherReleaseFragmentProgram(s_patcher, s_fp);
+        for (int i = 0; i < P_COUNT; i++)
+            if (s_fp[i])
+                sceGxmShaderPatcherReleaseFragmentProgram(s_patcher, s_fp[i]);
         sceGxmShaderPatcherDestroy(s_patcher);
     }
     s_patcher = NULL;
@@ -511,6 +541,10 @@ void sharpen_set_enabled(int on) {
     s_enabled = on;
 }
 
+void sharpen_set_style(int classic) {
+    s_style = classic ? P_CLASSIC : P_ADAPTIVE;
+}
+
 void sharpen_set_below(int width) {
     s_req_below = width;
     if (width <= 0)
@@ -524,9 +558,12 @@ void sharpen_set_strength(int percent) {
 }
 
 int sharpen_diag(char *buf, int size) {
-    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X%s amount %d%% below %d; passes %u swaps %u wide %u bad %u"
-            " (step %d err %08X; image %ux%u fmt %08X type %08X)",
-            s_state, s_hook, s_builtin ? " built-in" : "", (int)(s_amount * 50.0f + 0.5f), s_below, d_passes, d_swaps,
+    return sceClibSnprintf(buf, size, "sharpen: state %d hook %08X%s style %s (adaptive %s, last %s) amount %d%% below %d;"
+            " passes %u swaps %u wide %u bad %u (step %d err %08X; image %ux%u fmt %08X type %08X)",
+            s_state, s_hook, s_builtin ? " built-in" : "", s_style == P_ADAPTIVE ? "adaptive" : "classic",
+            !s_fprog[P_ADAPTIVE] ? "missing" : s_state < 2 ? "loaded" : s_fp[P_ADAPTIVE] ? "ready" : "failed",
+            s_used < 0 ? "-" : s_used == P_ADAPTIVE ? "adaptive" : "classic",
+            (int)(s_amount * 50.0f + 0.5f), s_below, d_passes, d_swaps,
             d_one, d_bad,
             s_why, (unsigned)s_why_err, s_src_w, s_src_h, s_src_fmt, s_src_type);
 }

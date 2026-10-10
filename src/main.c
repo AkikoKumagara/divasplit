@@ -287,7 +287,7 @@ static volatile int g_rec = 0;
 static volatile int g_avs = 0;
 static volatile int g_bar = 1;
 static volatile int g_opt = 0;       // setting: 0 off, 1 on, 2 A/B
-static volatile int g_drs = 0, g_sharp = 1;   // settings: dynamic resolution, sharpening (f 2nd)
+static volatile int g_drs = 0, g_sharp = 1, g_style = 0;   // settings: dynamic resolution, sharpening and its style
 static volatile int g_opt_on = 0;    // what the hooks use: 0 off, 1 on
 static int g_window_opt = 1;         // g_opt_on during the last log window
 static volatile SceUID g_main_thid = -1;   // the thread that runs RenderStage
@@ -752,6 +752,7 @@ static void settings_current(game_settings_t *gs) {
     gs->opt = g_opt;
     gs->drs = g_drs;
     gs->sharp = g_sharp;
+    gs->style = g_style;
 }
 
 static void settings_apply(const game_settings_t *gs) {
@@ -763,8 +764,10 @@ static void settings_apply(const game_settings_t *gs) {
     g_opt = gs->opt >= 0 && gs->opt <= 2 ? gs->opt : 0;
     g_drs = gs->drs != 0;
     g_sharp = gs->sharp != 0;
+    g_style = gs->style != 0;
     drs_set_enabled(g_drs);
     sharpen_set_enabled(g_sharp);
+    sharpen_set_style(g_style);
     g_dirty = 1;   // the render thread redraws the status line
 }
 

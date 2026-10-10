@@ -1,0 +1,27 @@
+/*
+ * Contrast-adaptive sharpening of the 3D image at its own resolution, before
+ * the game stretches it: AMD FidelityFX CAS's weighting (MIT) on the 4 direct
+ * neighbours. Per pixel and channel the amount falls where the neighbourhood
+ * already has contrast or is near black / white, so edges and stair-steps are
+ * not hardened (a strong unsharp mask before a 1.5-2x stretch looks crunchy);
+ * soft detail gets the full amount, as much as sharpen_f.cg gives at the same
+ * setting. Same cost class: 5 reads, half precision.
+ *
+ *   k.xy  one texel in UV, k.z the peak weight (0 = off, -0.2 = CAS's strongest)
+ *   lim   the image's area in the texture, half a texel in (the rest is stale)
+ */
+half4 main(float2 uv : TEXCOORD0, uniform sampler2D tex, uniform float4 k, uniform float4 lim) : COLOR
+{
+    half4 e = tex2D(tex, uv);
+    half3 b = tex2D(tex, clamp(uv + float2(0.0, -k.y), lim.xy, lim.zw)).rgb;
+    half3 d = tex2D(tex, clamp(uv + float2(-k.x, 0.0), lim.xy, lim.zw)).rgb;
+    half3 f = tex2D(tex, clamp(uv + float2(k.x, 0.0), lim.xy, lim.zw)).rgb;
+    half3 h = tex2D(tex, clamp(uv + float2(0.0, k.y), lim.xy, lim.zw)).rgb;
+    half3 mn = min(e.rgb, min(min(b, d), min(f, h)));
+    half3 mx = max(e.rgb, max(max(b, d), max(f, h)));
+    // headroom to black / white over the local maximum: 1 in soft areas, 0 on hard edges
+    half3 amp = sqrt(saturate(min(mn, (half)1.0 - mx) / max(mx, (half)(1.0 / 256.0))));
+    half3 w = amp * (half)k.z;
+    half3 s = (e.rgb + w * (b + d + f + h)) / ((half)1.0 + (half)4.0 * w);
+    return half4(saturate(s), e.a);
+}
