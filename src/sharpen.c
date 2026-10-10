@@ -50,7 +50,7 @@ static SceGxmFragmentProgram *s_fp;
 static const SceGxmProgramParameter *s_u_rect, *s_u_k, *s_u_lim, *s_u_col;
 static const float *s_quad;
 static const uint16_t *s_idx;
-static int s_state;   // 1 ready, < 0 why not
+static int s_state;   // 1 programs loaded and hooked, 2 GPU side ready too, < 0 why not
 
 static const sharpen_game_t *s_game;
 static uint8_t *s_g;
@@ -119,7 +119,8 @@ static const SceGxmProgram *load_gxp(const char *name, unsigned int *off) {
     return (const SceGxmProgram *)dst;
 }
 
-static int programs(void) {
+// at game start: the compiled programs
+static int load(void) {
     int r;
     if ((r = block_alloc(&s_b[B_PROGS], "divasplit_sh_progs", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, 16 * 1024)) < 0)
         return r;
@@ -128,7 +129,13 @@ static int programs(void) {
     s_fprog = load_gxp("rcas_f.gxp", &off);
     if (!s_vprog || !s_fprog)
         return -3;   // not compiled (no libshacccg.suprx when installing)
+    return 1;
+}
 
+// at the first blit (GXM is initialized by the game after our module_start:
+// mapping memory or making a patcher before that fails with 0x805B0000)
+static int gpu_setup(void) {
+    int r;
     if ((r = block_alloc(&s_b[B_HOST], "divasplit_sh_host", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, 64 * 1024)) < 0)
         return r;
     if (!(s_host = sceClibMspaceCreate(s_b[B_HOST].base, s_b[B_HOST].size)))
@@ -273,6 +280,14 @@ static void blit_hook(void *mgr, const float *uv, const float *col, float z) {
         next(mgr, uv, col, z);
         return;
     }
+    if (s_state == 1) {   // first time: the GPU side, once
+        int r = gpu_setup();
+        s_state = r == 1 ? 2 : r < 0 ? r : -5;
+    }
+    if (s_state != 2) {
+        next(mgr, uv, col, z);
+        return;
+    }
     for (int i = 0; i < 4; i++) {
         s_uv[i] = uv[i];
         s_col[i] = col[i];
@@ -288,7 +303,7 @@ static void blit_hook(void *mgr, const float *uv, const float *col, float z) {
 int sharpen_init(SceUID modid, uintptr_t seg0, uintptr_t seg1, const sharpen_game_t *g) {
     if (s_state != 0)
         return s_state;
-    s_state = programs();
+    s_state = load();
     if (s_state != 1)
         return s_state;
     s_game = g;
