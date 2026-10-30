@@ -200,6 +200,13 @@ static const uint8_t F2ND_DIRTY_ORIG[32] = {
     .list_sort = 0x5ABB9C, .sort0_flag = 0x4478A1, .r2 = &F2ND_R2,
 };
 
+// US F2ND shares hooks with EU version, including the sort0 flag.
+static const opt_cuts_t F2ND_CUTS_US = {
+    .centre = 0x245CDC, .mul44 = 0x4D0FDE, .inv44 = 0x4D0BE0, .xform = 0x4D1DC6,
+    .dirty_loop = 0x4DF012, .dirty_orig = F2ND_DIRTY_ORIG, .dirty_len = 32,
+    .list_sort = 0x5ABB9C, .sort0_flag = 0x4478A1, .r2 = &F2ND_R2,
+};
+
 // f EU 1.00: the same engine generation, its own layout (G = seg1+0x2FC6B8, one
 // matrix context, records of 0x364, uniforms through SetUniformDataF)
 // 0x3D7F38: for (i = 0; i < 0xE0; i++) if (t[0x1A2A + i]) t[0x1A2A + i] = 0; (24 bytes)
@@ -256,12 +263,15 @@ static const sharpen_game_t F_SHARPEN = {.blit = 0x28260C, .blit_ret = 0x283CD2,
 
 static const game_t GAMES[] = {
     // X: FM pointer 0x814F756C, stage table pointer 0x814F0208 (seg1 0x814EE000)
-    {0x0A3FF027, GAME_X,    0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0, {0}, NULL},
-    // f: FM 0x816E7228, stage table 0x818F8B58 (seg1 0x81689000)
-    {0x544807B3, GAME_F,    0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}, &F_CUTS, &F_SHARPEN, &F_DRS},
-    // f 2nd: FM 0x81787B18, stage table 0x81B62800 (seg1 0x8171B000)
-    // uniform reuse off (see opt.c); f 2nd's offsets: {0x4DE90A, 0x4DE8B8, 0x4DE8EA}
+    {0x0A3FF027, GAME_X, 0x271368, 0x956C,  1, 0x2D, 0x2208,   1, 1, 3, 2, 0, 0x0C, 0, {0}, NULL},
+    // Project DIVA f EU
+    {0x544807B3, GAME_F, 0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}, &F_CUTS, &F_SHARPEN, &F_DRS},
+    // Project DIVA f US
+    {0x1BA9AC18, GAME_F, 0x28C54E, 0x5E228, 0, 0xEC, 0x26FB58, 0, 0, 8, 7, 5, 0x18, 0, {0}, &F_CUTS, &F_SHARPEN, &F_DRS},
+    // Project DIVA f 2nd EU
     {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS, &F2ND_SHARPEN, &F2ND_DRS},
+    // Project DIVA f 2nd US
+    {0x31DAC716, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS_US, &F2ND_SHARPEN, &F2ND_DRS},
 };
 #define GAME_COUNT (int)(sizeof(GAMES) / sizeof(GAMES[0]))
 

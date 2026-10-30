@@ -39,6 +39,7 @@ KNOWN = {
     0x0A3FF027: {0x271368: 'RenderStage'},                     # X
     0x544807B3: {0x28C54E: 'RenderStage', 0x13D00: 'GetDelta'},   # f
     0xDB737975: {0x265920: 'RenderStage', 0xAE7A: 'GetDelta'},     # f 2nd
+    0x31DAC716: {0x265920: 'RenderStage'},
 }
 
 

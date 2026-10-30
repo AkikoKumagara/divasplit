@@ -5,8 +5,8 @@ Frame pacing and performance plugin for **Hatsune Miku: Project DIVA X, f and f 
 | Game | Title ID | Version |
 |---|---|---|
 | Project DIVA X | PCSB01007 / PCSE00867 | EU / US 1.00 |
-| Project DIVA f | PCSB00419 | EU 1.00 |
-| Project DIVA f 2nd | PCSB00554 | EU 1.00 |
+| Project DIVA f | PCSB00419 / PCSE00326 | EU / US 1.00 |
+| Project DIVA f 2nd | PCSB00554 / PCSE00434 | EU / US 1.00 |
 
 In any other game or version the plugin stays idle.
 
@@ -174,7 +174,7 @@ The games only accept a controller sample newer than the last one they used. At 
 
 ## Other releases (US / JP / ASIA)
 
-Only the EU releases (plus X US, which is the same build) are supported so far, because every release puts the code at different addresses. `tools/port.py` ports both the 60 fps patch and the plugin addresses to another release of X, f or f 2nd. It finds each EU patch site by the code around it.
+Only the EU and US releases are supported so far, because every release puts the code at different addresses. `tools/port.py` ports both the 60 fps patch and the plugin addresses to another release of X, f or f 2nd. It finds each EU patch site by the code around it.
 
 1. Dump the decrypted `eboot.bin` of **your own copy** (e.g. with FAGDec) and copy it to a PC.
 2. Run the script:
