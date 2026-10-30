@@ -200,13 +200,6 @@ static const uint8_t F2ND_DIRTY_ORIG[32] = {
     .list_sort = 0x5ABB9C, .sort0_flag = 0x4478A1, .r2 = &F2ND_R2,
 };
 
-// US F2ND shares hooks with EU version, including the sort0 flag.
-static const opt_cuts_t F2ND_CUTS_US = {
-    .centre = 0x245CDC, .mul44 = 0x4D0FDE, .inv44 = 0x4D0BE0, .xform = 0x4D1DC6,
-    .dirty_loop = 0x4DF012, .dirty_orig = F2ND_DIRTY_ORIG, .dirty_len = 32,
-    .list_sort = 0x5ABB9C, .sort0_flag = 0x4478A1, .r2 = &F2ND_R2,
-};
-
 // f EU 1.00: the same engine generation, its own layout (G = seg1+0x2FC6B8, one
 // matrix context, records of 0x364, uniforms through SetUniformDataF)
 // 0x3D7F38: for (i = 0; i < 0xE0; i++) if (t[0x1A2A + i]) t[0x1A2A + i] = 0; (24 bytes)
@@ -271,7 +264,7 @@ static const game_t GAMES[] = {
     // Project DIVA f 2nd EU
     {0xDB737975, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS, &F2ND_SHARPEN, &F2ND_DRS},
     // Project DIVA f 2nd US
-    {0x31DAC716, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS_US, &F2ND_SHARPEN, &F2ND_DRS},
+    {0x31DAC716, GAME_F2ND, 0x265920, 0x6CB18, 0, 0xDC, 0x447800, 0, 0, 3, 2, 0, 0x0C, 0, {0}, &F2ND_CUTS, &F2ND_SHARPEN, &F2ND_DRS},
 };
 #define GAME_COUNT (int)(sizeof(GAMES) / sizeof(GAMES[0]))
 
