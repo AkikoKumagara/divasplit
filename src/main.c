@@ -2,7 +2,9 @@
  * divasplit - frame pacing / split render plugin for Hatsune Miku: Project DIVA
  *   X     EU/US 1.00 (PCSB01007 / PCSE00867, module NID 0x0A3FF027)
  *   f     EU 1.00    (PCSB00419,             module NID 0x544807B3)
+ *   f     US 1.00    (PCSE00326,             module NID 0x1BA9AC18)
  *   f 2nd EU 1.00    (PCSB00554,             module NID 0xDB737975)
+ *   f 2nd US 1.00    (PCSE00434,             module NID 0x31DAC716)
  *
  * Every frame the games call RenderStage(stage) in a loop. X and f 2nd have
  * 8 stages (X: seg0+0x271368, f 2nd: seg0+0x265920, same layout):
